@@ -14,3 +14,19 @@ Fallback to `@TERMUX_PREFIX@/tmp` if env `XDG_RUNTIME_DIR` is not set.
     if (!path) {
        errno = ENOENT;
        return -1;
+diff --git a/meson.build b/meson.build
+index b9edca30189..dbede3ca76a 100644
+--- a/meson.build
++++ b/meson.build
+@@ -1376,11 +1376,9 @@ endforeach
+ functions_to_detect = {
+   'strtof': '',
+   'mkostemp': '',
+-  'memfd_create': '',
+   'random_r': '',
+   'flock': '',
+   'strtok_r': '',
+-  'getrandom': '',
+   'qsort_s': '',
+   'posix_fallocate': '',
+   'secure_getenv': '',
