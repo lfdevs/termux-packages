@@ -2,20 +2,19 @@ TERMUX_PKG_HOMEPAGE=https://opencv.org/
 TERMUX_PKG_DESCRIPTION="Open Source Computer Vision Library"
 TERMUX_PKG_LICENSE="Apache-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="4.11.0"
+TERMUX_PKG_VERSION="4.12.0"
+TERMUX_PKG_REVISION=2
 TERMUX_PKG_SRCURL=(
 	https://github.com/opencv/opencv/archive/${TERMUX_PKG_VERSION}/opencv-${TERMUX_PKG_VERSION}.tar.gz
 	https://github.com/opencv/opencv_contrib/archive/${TERMUX_PKG_VERSION}/opencv_contrib-${TERMUX_PKG_VERSION}.tar.gz
 )
 TERMUX_PKG_SHA256=(
-	9a7c11f924eff5f8d8070e297b322ee68b9227e003fd600d4b8122198091665f
-	2dfc5957201de2aa785064711125af6abb2e80a64e2dc246aca4119b19687041
+	44c106d5bb47efec04e531fd93008b3fcd1d27138985c5baf4eafac0e1ec9e9d
+	4197722b4c5ed42b476d42e29beb29a52b6b25c34ec7b4d589c3ae5145fee98e
 )
 TERMUX_PKG_AUTO_UPDATE=true
-TERMUX_PKG_DEPENDS="abseil-cpp, ffmpeg, libc++, libjpeg-turbo, libopenblas, libpng, libtiff, libwebp, openjpeg, openjpeg-tools, qt6-qtbase, qt6-qt5compat, zlib"
-# For static libprotobuf see
-# https://github.com/termux/termux-packages/issues/16979
-TERMUX_PKG_BUILD_DEPENDS="libutf8-range, protobuf-static, python-numpy-static"
+TERMUX_PKG_DEPENDS="abseil-cpp, ffmpeg, libc++, libjpeg-turbo, libopenblas, libpng, libprotobuf, libtiff, libwebp, openjpeg, openjpeg-tools, qt6-qtbase, qt6-qt5compat, zlib"
+TERMUX_PKG_BUILD_DEPENDS="python-numpy-static"
 TERMUX_PKG_PYTHON_COMMON_DEPS="Cython, wheel"
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -DANDROID_NO_TERMUX=OFF
@@ -33,12 +32,14 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 
 termux_step_pre_configure() {
 	termux_setup_protobuf
-	TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -DProtobuf_PROTOC_EXECUTABLE=$(command -v protoc)"
-	sed -i 's/COMMAND\sprotobuf::protoc/COMMAND ${Protobuf_PROTOC_EXECUTABLE}/g' $TERMUX_PREFIX/lib/cmake/protobuf/protobuf-generate.cmake
+
+	if [ "$TERMUX_ON_DEVICE_BUILD" = "false" ]; then
+		# By default cmake will pick $TERMUX_PREFIX/bin/protoc, we should avoid it when cross-compiling
+		TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -DPROTOBUF_PROTOC_EXECUTABLE=$(command -v protoc)"
+	fi
 
 	# Keep this the same version which abseil-cpp requires
 	CXXFLAGS+=" -std=c++17"
-	LDFLAGS+=" -lutf8_range -lutf8_validity"
 	LDFLAGS+=" $($TERMUX_SCRIPTDIR/packages/libprotobuf/interface_link_libraries.sh)"
 	LDFLAGS+=" -llog"
 
@@ -52,14 +53,4 @@ termux_step_pre_configure() {
 		-DPYTHON3_INCLUDE_PATH=$TERMUX_PREFIX/include/python${TERMUX_PYTHON_VERSION}
 		-DPYTHON3_NUMPY_INCLUDE_DIRS=$TERMUX_PYTHON_HOME/site-packages/numpy/_core/include
 		"
-
-	mv $TERMUX_PREFIX/lib/libprotobuf.so{,.tmp}
-}
-
-termux_step_post_make_install() {
-	mv $TERMUX_PREFIX/lib/libprotobuf.so{.tmp,}
-}
-
-termux_step_post_massage() {
-	rm -rf lib/libprotobuf.so lib/cmake/protobuf/
 }

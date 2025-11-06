@@ -15,7 +15,7 @@ TERMUX_PKG_BUILD_DEPENDS="carbonyl-host-tools, libnotify, libffi-static"
 TERMUX_PKG_ON_DEVICE_BUILD_NOT_SUPPORTED=true
 # Chromium doesn't support i686 on Linux.
 # Carbonyl donesn't support arm.
-TERMUX_PKG_BLACKLISTED_ARCHES="arm, i686"
+TERMUX_PKG_EXCLUDED_ARCHES="arm, i686"
 
 SYSTEM_LIBRARIES="    libdrm  fontconfig"
 # TERMUX_PKG_DEPENDS="libdrm, fontconfig"
@@ -124,7 +124,7 @@ termux_step_configure() {
 	popd
 
 	# Construct args
-	local _clang_base_path="/usr/lib/llvm-18"
+	local _clang_base_path="$TERMUX_HOST_LLVM_BASE_DIR"
 	local _host_cc="$_clang_base_path/bin/clang"
 	local _host_cxx="$_clang_base_path/bin/clang++"
 	local _host_toolchain="$TERMUX_PKG_CACHEDIR/custom-toolchain:host"

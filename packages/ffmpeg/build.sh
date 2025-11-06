@@ -3,12 +3,11 @@ TERMUX_PKG_DESCRIPTION="Tools and libraries to manipulate a wide range of multim
 TERMUX_PKG_LICENSE="GPL-3.0"
 TERMUX_PKG_MAINTAINER="@termux"
 # Please align version with `ffplay` package.
-TERMUX_PKG_VERSION="7.1"
-TERMUX_PKG_REVISION=2
+TERMUX_PKG_VERSION="7.1.2"
 TERMUX_PKG_SRCURL=https://www.ffmpeg.org/releases/ffmpeg-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=40973d44970dbc83ef302b0609f2e74982be2d85916dd2ee7472d30678a7abe6
-TERMUX_PKG_DEPENDS="fontconfig, freetype, fribidi, game-music-emu, harfbuzz, libaom, libandroid-glob, libass, libbluray, libbz2, libdav1d, libgnutls, libiconv, liblzma, libmp3lame, libopencore-amr, libopenmpt, libopus, librav1e, libsoxr, libsrt, libssh, libtheora, libv4l, libvidstab, libvmaf, libvo-amrwbenc, libvorbis, libvpx, libwebp, libx264, libx265, libxml2, libzimg, littlecms, ocl-icd, rubberband, svt-av1, xvidcore, zlib"
-TERMUX_PKG_BUILD_DEPENDS="opencl-headers"
+TERMUX_PKG_SHA256=089bc60fb59d6aecc5d994ff530fd0dcb3ee39aa55867849a2bbc4e555f9c304
+TERMUX_PKG_DEPENDS="fontconfig, freetype, fribidi, game-music-emu, glslang, harfbuzz, libaom, libandroid-glob, libandroid-stub, libass, libbluray, libbz2, libdav1d, libgnutls, libiconv, liblzma, libmp3lame, libopencore-amr, libopenmpt, libopus, libplacebo, librav1e, libsoxr, libsrt, libssh, libtheora, libv4l, libvidstab, libvmaf, libvo-amrwbenc, libvorbis, libvpx, libwebp, libx264, libx265, libxml2, libzimg, libzmq, littlecms, ocl-icd, rubberband, svt-av1, vulkan-icd, xvidcore, zlib"
+TERMUX_PKG_BUILD_DEPENDS="opencl-headers, vulkan-headers"
 TERMUX_PKG_CONFLICTS="libav"
 TERMUX_PKG_BREAKS="ffmpeg-dev"
 TERMUX_PKG_REPLACES="ffmpeg-dev"
@@ -29,6 +28,15 @@ termux_step_pre_configure() {
 			termux_error_exit "SOVERSION guard check failed for libav${f}.so. expected ${v}"
 		fi
 	done
+
+	# use '-Wno-error=incompatible-pointer-types' with 32-bit ARM target to work around
+	# error: incompatible function pointer types initializing
+	# 'PFN_vkDebugUtilsMessengerCallbackEXT'... with an expression of type 'VkBool32`...
+	# following the example of the Arch Linux AUR lib32-ffmpeg package:
+	# https://aur.archlinux.org/cgit/aur.git/tree/PKGBUILD?h=lib32-ffmpeg&id=41476d610980376bcbe054ee183f46705be27747#n171
+	if [[ "$TERMUX_ARCH" == "arm" ]]; then
+		CFLAGS+=" -Wno-error=incompatible-pointer-types"
+	fi
 }
 
 termux_step_configure() {
@@ -81,6 +89,7 @@ termux_step_configure() {
 		--enable-libfontconfig \
 		--enable-libfreetype \
 		--enable-libfribidi \
+		--enable-libglslang \
 		--enable-libgme \
 		--enable-libharfbuzz \
 		--enable-libmp3lame \
@@ -88,6 +97,7 @@ termux_step_configure() {
 		--enable-libopencore-amrwb \
 		--enable-libopenmpt \
 		--enable-libopus \
+		--enable-libplacebo \
 		--enable-librav1e \
 		--enable-librubberband \
 		--enable-libsoxr \
@@ -107,13 +117,14 @@ termux_step_configure() {
 		--enable-libxml2 \
 		--enable-libxvid \
 		--enable-libzimg \
+		--enable-libzmq \
 		--enable-mediacodec \
 		--enable-opencl \
 		--enable-shared \
 		--prefix="$TERMUX_PREFIX" \
 		--target-os=android \
 		--extra-libs="-landroid-glob" \
-		--disable-vulkan \
+		--enable-vulkan \
 		$_EXTRA_CONFIGURE_FLAGS \
 		--disable-libfdk-aac
 	# GPLed FFmpeg binaries linked against fdk-aac are not redistributable.
@@ -132,4 +143,12 @@ termux_step_post_massage() {
 			ln -sf libav${f}.so libav${f}.so.${s}
 		fi
 	done
+}
+
+termux_step_create_debscripts() {
+	# See: https://github.com/termux/termux-packages/issues/23189#issuecomment-2663464359
+	# See also: https://github.com/termux/termux-packages/wiki/Termux-execution-environment#dynamic-library-linking-errors
+	sed -e "s|@TERMUX_PREFIX@|$TERMUX_PREFIX|g" \
+		"$TERMUX_PKG_BUILDER_DIR/postinst.sh.in" > ./postinst
+	chmod +x ./postinst
 }

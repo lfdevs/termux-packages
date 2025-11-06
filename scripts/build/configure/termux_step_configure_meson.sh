@@ -14,7 +14,8 @@ termux_step_configure_meson() {
 		$TERMUX_PKG_BUILDDIR \
 		--$(test "${TERMUX_PKG_MESON_NATIVE}" = "true" && echo "native-file" || echo "cross-file") $TERMUX_MESON_CROSSFILE \
 		--prefix $TERMUX_PREFIX \
-		--libdir lib \
+		--libdir $TERMUX__PREFIX__LIB_SUBDIR \
+		--includedir $TERMUX__PREFIX__INCLUDE_SUBDIR \
 		--buildtype ${_meson_buildtype} \
 		${_meson_stripflag} \
 		$TERMUX_PKG_EXTRA_CONFIGURE_ARGS \

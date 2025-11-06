@@ -2,12 +2,13 @@ TERMUX_PKG_HOMEPAGE=https://www.kde.org/
 TERMUX_PKG_DESCRIPTION="Qt addon providing access to numerous types of archives (KDE)"
 TERMUX_PKG_LICENSE="LGPL-2.1"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="6.10.0"
-TERMUX_PKG_SRCURL="https://download.kde.org/stable/frameworks/${TERMUX_PKG_VERSION%.*}/karchive-${TERMUX_PKG_VERSION}.tar.xz"
-TERMUX_PKG_SHA256=ac5160c19dd110bbdadeba9c5355cbfd3b5c1bd00ce3dbdc4a085776698c8a48
+TERMUX_PKG_VERSION="6.19.0"
+_KF6_MINOR_VERSION="${TERMUX_PKG_VERSION%.*}"
+TERMUX_PKG_SRCURL="https://download.kde.org/stable/frameworks/${_KF6_MINOR_VERSION}/karchive-${TERMUX_PKG_VERSION}.tar.xz"
+TERMUX_PKG_SHA256=944332d802d0e128cebd087ffd50b726d100347973c2037c6051c72d54512a9e
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="libbz2, libc++, liblzma, qt6-qtbase, zlib, zstd"
-TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${TERMUX_PKG_VERSION}), qt6-qttools"
+TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${_KF6_MINOR_VERSION}), qt6-qttools"
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -DCMAKE_SYSTEM_NAME=Linux
 -DKDE_INSTALL_QMLDIR=lib/qt6/qml

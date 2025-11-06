@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://www.nginx.org
 TERMUX_PKG_DESCRIPTION="Lightweight HTTP server"
 TERMUX_PKG_LICENSE="BSD 2-Clause"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="1.27.3"
+TERMUX_PKG_VERSION="1.29.3"
 TERMUX_PKG_SRCURL=https://nginx.org/download/nginx-$TERMUX_PKG_VERSION.tar.gz
-TERMUX_PKG_SHA256=ba23a9568f442036b61cd0e29bd66a47b90634efa91e0b2cf2d719057a9b7903
+TERMUX_PKG_SHA256=9befcced12ee09c2f4e1385d7e8e21c91f1a5a63b196f78f897c2d044b8c9312
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="libandroid-glob, libcrypt, pcre2, openssl, zlib"
 TERMUX_PKG_BUILD_IN_SRC=true
@@ -83,8 +83,7 @@ termux_step_post_make_install() {
 	rm "$TERMUX_PREFIX"/etc/nginx/*.default
 
 	# move default html dir
-	sed -e "44s|html|$TERMUX_PREFIX/share/nginx/html|" \
-		-e "54s|html|$TERMUX_PREFIX/share/nginx/html|" \
+	sed -e "s| html;| $TERMUX_PREFIX/share/nginx/html;|" \
 		-i "$TERMUX_PREFIX/etc/nginx/nginx.conf"
 	rm -rf "$TERMUX_PREFIX/share/nginx"
 	mkdir -p "$TERMUX_PREFIX/share/nginx"

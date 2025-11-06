@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://github.com/lu-zero/cargo-c
 TERMUX_PKG_DESCRIPTION="Cargo C-ABI helpers"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="0.10.9"
+TERMUX_PKG_VERSION="0.10.18"
 TERMUX_PKG_SRCURL=https://github.com/lu-zero/cargo-c/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=4542e39aa67bf8712c60f21701cc8e8b5153d0344afe1b618f121f696b578a7f
+TERMUX_PKG_SHA256=0f2b699be7ad5cac05624701065ae521c7f6b8159bdbcb8103445fc2440d1a7e
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_UPDATE_VERSION_REGEXP='^\d+\.\d+(\.\d+)?$'
 TERMUX_PKG_DEPENDS="libcurl, libgit2, libssh2, openssl, zlib"
@@ -22,30 +22,8 @@ termux_pkg_auto_update() {
 termux_step_pre_configure() {
 	export LIBGIT2_SYS_USE_PKG_CONFIG=1
 	export LIBSSH2_SYS_USE_PKG_CONFIG=1
-	export PKG_CONFIG_ALLOW_CROSS=1
 
 	termux_setup_rust
-
-	: "${CARGO_HOME:=$HOME/.cargo}"
-	export CARGO_HOME
-
-	cargo fetch --target "${CARGO_TARGET_NAME}"
-
-	local f
-	for f in $CARGO_HOME/registry/src/*/libgit2-sys-*/build.rs; do
-		sed -i -E 's/\.range_version\(([^)]*)\.\.[^)]*\)/.atleast_version(\1)/g' "${f}"
-	done
-
-	local _CARGO_TARGET_LIBDIR="target/${CARGO_TARGET_NAME}/release/deps"
-	mkdir -p $_CARGO_TARGET_LIBDIR
-
-	mv $TERMUX_PREFIX/lib/libz.so.1{,.tmp}
-	mv $TERMUX_PREFIX/lib/libz.so{,.tmp}
-
-	ln -sfT $(readlink -f $TERMUX_PREFIX/lib/libz.so.1.tmp) \
-		$_CARGO_TARGET_LIBDIR/libz.so.1
-	ln -sfT $(readlink -f $TERMUX_PREFIX/lib/libz.so.tmp) \
-		$_CARGO_TARGET_LIBDIR/libz.so
 
 	if [[ "${TERMUX_ARCH}" == "x86_64" ]]; then
 		local env_host=$(printf $CARGO_TARGET_NAME | tr a-z A-Z | sed s/-/_/g)
@@ -54,14 +32,4 @@ termux_step_pre_configure() {
 
 	# clash with rust host build
 	unset CFLAGS
-}
-
-termux_step_post_make_install() {
-	mv $TERMUX_PREFIX/lib/libz.so.1{.tmp,}
-	mv $TERMUX_PREFIX/lib/libz.so{.tmp,}
-}
-
-termux_step_post_massage() {
-	rm -f lib/libz.so.1
-	rm -f lib/libz.so
 }

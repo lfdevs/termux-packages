@@ -3,6 +3,7 @@ TERMUX_PKG_DESCRIPTION="H.265/HEVC video stream encoder library"
 TERMUX_PKG_LICENSE="GPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
 TERMUX_PKG_VERSION="4.1"
+TERMUX_PKG_REVISION=1
 TERMUX_PKG_SRCURL=https://bitbucket.org/multicoreware/x265_git/downloads/x265_${TERMUX_PKG_VERSION}.tar.gz
 TERMUX_PKG_SHA256=a31699c6a89806b74b0151e5e6a7df65de4b49050482fe5ebf8a4379d7af8f29
 TERMUX_PKG_DEPENDS="libandroid-posix-semaphore, libc++"
@@ -44,6 +45,6 @@ termux_step_pre_configure() {
 termux_step_post_massage() {
 	local _GUARD_FILE="lib/${TERMUX_PKG_NAME}.so"
 	if [ ! -e "${_GUARD_FILE}" ]; then
-		termux_error_exit "Error: file ${_GUARD_FILE} not found."
+		termux_error_exit "file ${_GUARD_FILE} not found."
 	fi
 }

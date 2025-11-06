@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://pip.pypa.io/
 TERMUX_PKG_DESCRIPTION="The PyPA recommended tool for installing Python packages"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="24.3.1"
+TERMUX_PKG_VERSION="25.3"
 TERMUX_PKG_SRCURL=https://github.com/pypa/pip/archive/$TERMUX_PKG_VERSION.tar.gz
-TERMUX_PKG_SHA256=1349240eff5fd44f4b9d834d503d87505a6cd0a8ab022f3f1665181d6a719a73
+TERMUX_PKG_SHA256=6f4d5c31324f7f998ec7c626c3a1543b5db5fb82c941c2b2952eeee183340d8f
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_UPDATE_TAG_TYPE="newest-tag"
 TERMUX_PKG_UPDATE_VERSION_REGEXP='^\d+\.\d+(\.\d+)?$'
@@ -13,7 +13,7 @@ TERMUX_PKG_ANTI_BUILD_DEPENDS="clang"
 TERMUX_PKG_BREAKS="python (<< 3.11.1-1)"
 TERMUX_PKG_PLATFORM_INDEPENDENT=true
 TERMUX_PKG_BUILD_IN_SRC=true
-TERMUX_PKG_PYTHON_COMMON_DEPS="wheel, setuptools==69.5.1, docutils, myst_parser, sphinx_copybutton, sphinx_inline_tabs, sphinxcontrib.towncrier, completion"
+TERMUX_PKG_PYTHON_COMMON_DEPS="docutils, myst_parser, sphinx_copybutton, sphinx_inline_tabs, sphinxcontrib.towncrier, completion"
 
 termux_pkg_auto_update() {
 	local tag
@@ -33,7 +33,7 @@ termux_step_post_make_install() {
 	( # creating pip documentation
 		cd docs/
 		python pip_sphinxext.py
-		sphinx-build -b man -d build/doctrees/man man build/man -c html
+		sphinx-build -b man -d build/doctrees/man man build/man -c html --tag man
 	)
 
 	install -vDm 644 LICENSE.txt -t "$TERMUX_PREFIX/share/licenses/python-pip/"

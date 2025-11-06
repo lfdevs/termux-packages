@@ -1,11 +1,10 @@
-TERMUX_PKG_HOMEPAGE=https://pygobject.readthedocs.io/
+TERMUX_PKG_HOMEPAGE=https://pygobject.gnome.org/
 TERMUX_PKG_DESCRIPTION="Python package which provides bindings for GObject based libraries"
 TERMUX_PKG_LICENSE="LGPL-2.1"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="3.50.0"
-TERMUX_PKG_REVISION=1
-TERMUX_PKG_SRCURL=https://download.gnome.org/sources/pygobject/${TERMUX_PKG_VERSION%.*}/pygobject-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=8d836e75b5a881d457ee1622cae4a32bcdba28a0ba562193adb3bbb472472212
+TERMUX_PKG_VERSION="3.54.5"
+TERMUX_PKG_SRCURL=https://download.gnome.org/sources/pygobject/${TERMUX_PKG_VERSION%.*}/pygobject-${TERMUX_PKG_VERSION}.tar.gz
+TERMUX_PKG_SHA256=b6656f6348f5245606cf15ea48c384c7f05156c75ead206c1b246c80a22fb585
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="glib, gobject-introspection, libcairo, libffi, pycairo, python"
 TERMUX_PKG_BUILD_DEPENDS="g-ir-scanner"

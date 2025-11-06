@@ -2,17 +2,16 @@ TERMUX_PKG_HOMEPAGE=https://github.com/kcleal/gw
 TERMUX_PKG_DESCRIPTION="A browser for genomic sequencing data (.bam/.cram format)"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="clealk@cardiff.ac.uk"
-TERMUX_PKG_VERSION="1.1.2"
-TERMUX_PKG_REVISION=1
+TERMUX_PKG_VERSION="1.2.6"
 TERMUX_PKG_SRCURL=https://github.com/kcleal/gw/archive/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=c01a3ea537342ebfc8ff7e2a5fb04507693e71ba3184ffa4ff1c4bc6d7aba613
+TERMUX_PKG_SHA256=4ab7afc7c8785f956e9ee32c984a5f69c4671d3025d53493a5cd9e295701dad0
 TERMUX_PKG_DEPENDS="glfw, htslib, libc++, libjpeg-turbo, opengl, libcurl"
 TERMUX_PKG_BUILD_DEPENDS="fontconfig, freetype, libicu, libuuid, mesa-dev, libcurl"
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_BUILD_IN_SRC=true
 
 # htslib is not available for arm.
-TERMUX_PKG_BLACKLISTED_ARCHES="arm"
+TERMUX_PKG_EXCLUDED_ARCHES="arm"
 
 termux_step_pre_configure() {
 	LDFLAGS+=" -llog"

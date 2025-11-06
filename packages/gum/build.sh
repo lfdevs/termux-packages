@@ -3,9 +3,9 @@ TERMUX_PKG_DESCRIPTION="A tool for creating minimal interactive TUIs for shell s
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="LICENSE"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="0.15.0"
+TERMUX_PKG_VERSION="0.17.0"
 TERMUX_PKG_SRCURL="https://github.com/charmbracelet/gum/archive/refs/tags/v$TERMUX_PKG_VERSION.tar.gz"
-TERMUX_PKG_SHA256=a6a05f4b36ce622458091ca17345765ed1e248a6ca737bade2fa27ac2e4bdff5
+TERMUX_PKG_SHA256=763a7f89dfebf8e77f86e680bace48a09423cfb9e4b4f4ba22d2c9836d311f95
 TERMUX_PKG_AUTO_UPDATE=true
 
 termux_step_make() {

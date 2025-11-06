@@ -2,21 +2,19 @@ TERMUX_PKG_HOMEPAGE=https://github.com/bluenviron/mediamtx
 TERMUX_PKG_DESCRIPTION="Ready-to-use SRT / WebRTC / RTSP / RTMP / LL-HLS media server and media proxy"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="1.11.1"
+TERMUX_PKG_VERSION="1.15.3"
 TERMUX_PKG_SRCURL=https://github.com/bluenviron/mediamtx/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=a9fe280cd95c9dba23c5c6dd6af4233879a2a9a2ee3e653e86ee7c470bb7ceb8
+TERMUX_PKG_SHA256=1c906b3f08d81bb3db763e2649e83e99c9090a1e8d0da6a4cd88f510117ad16d
 TERMUX_PKG_BUILD_IN_SRC=true
-TERMUX_PKG_HOSTBUILD=true
 TERMUX_PKG_AUTO_UPDATE=true
 
-termux_step_host_build() {
+termux_step_post_get_source() {
 	termux_setup_golang
-	pushd "${TERMUX_PKG_SRCDIR}"
 	go generate ./...
-	popd
 }
 
 termux_step_make() {
+	termux_setup_golang
 	echo "v${TERMUX_PKG_VERSION}" > "${TERMUX_PKG_SRCDIR}"/internal/core/VERSION
 	export GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
 

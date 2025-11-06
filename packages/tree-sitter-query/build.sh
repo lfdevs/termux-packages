@@ -1,20 +1,16 @@
-TERMUX_PKG_HOMEPAGE=https://github.com/tree-sitter-grammars
+TERMUX_PKG_HOMEPAGE=https://github.com/tree-sitter-grammars/tree-sitter-query
 TERMUX_PKG_DESCRIPTION="TS query grammar for tree-sitter"
 TERMUX_PKG_LICENSE="Apache-2.0"
-TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="0.4.0"
-TERMUX_PKG_REVISION=1
+TERMUX_PKG_MAINTAINER="Joshua Kahn @TomJo2000"
+TERMUX_PKG_VERSION="0.7.0"
 TERMUX_PKG_SRCURL=https://github.com/tree-sitter-grammars/tree-sitter-query/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=d3a423ab66dc62b2969625e280116678a8a22582b5ff087795222108db2f6a6e
+TERMUX_PKG_SHA256=79285847e8350ee9fe1f6f6c9eb64bc14320f70f7b9b65037193fc58f2638613
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_UPDATE_TAG_TYPE='newest-tag'
 TERMUX_PKG_BUILD_IN_SRC=true
-TERMUX_PKG_EXTRA_MAKE_ARGS="
-PARSER_URL=https://github.com/tree-sitter-grammars/tree-sitter-query
-"
 
 termux_step_pre_configure() {
-	rm setup.py pyproject.toml
+	termux_setup_treesitter
 }
 
 termux_step_post_make_install() {

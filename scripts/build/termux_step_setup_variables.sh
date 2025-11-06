@@ -6,7 +6,8 @@ termux_step_setup_variables() {
 	: "${TERMUX_FORCE_BUILD_DEPENDENCIES:="false"}"
 	: "${TERMUX_INSTALL_DEPS:="false"}"
 	: "${TERMUX_PKG_MAKE_PROCESSES:="$(nproc)"}"
-	: "${TERMUX_NO_CLEAN:="false"}"
+	: "${TERMUX_PKGS__BUILD__RM_ALL_PKGS_BUILT_MARKER_AND_INSTALL_FILES:="true"}"
+	: "${TERMUX_PKGS__BUILD__RM_ALL_PKG_BUILD_DEPENDENT_DIRS:="false"}"
 	: "${TERMUX_PKG_API_LEVEL:="24"}"
 	: "${TERMUX_CONTINUE_BUILD:="false"}"
 	: "${TERMUX_QUIET_BUILD:="false"}"
@@ -36,7 +37,7 @@ termux_step_setup_variables() {
 	fi
 
 	if [ "$TERMUX_PACKAGE_LIBRARY" = "glibc" ]; then
-		export TERMUX_PREFIX="$TERMUX_PREFIX/glibc"
+		termux_build_props__set_termux_prefix_dir_and_sub_variables "$TERMUX__PREFIX_GLIBC"
 		if [ "$TERMUX_ON_DEVICE_BUILD" = "false" ] && [ "$TERMUX_PREFIX" != "$CGCT_DEFAULT_PREFIX" ]; then
 			export CGCT_APP_PREFIX="$TERMUX_PREFIX"
 		fi
@@ -49,11 +50,11 @@ termux_step_setup_variables() {
 		# For on-device builds cross-compiling is not supported so we can
 		# store information about built packages under $TERMUX_TOPDIR.
 		TERMUX_BUILT_PACKAGES_DIRECTORY="$TERMUX_TOPDIR/.built-packages"
-		TERMUX_NO_CLEAN="true"
+		TERMUX_PKGS__BUILD__RM_ALL_PKGS_BUILT_MARKER_AND_INSTALL_FILES="false"
 
 		if [ "$TERMUX_PACKAGE_LIBRARY" = "bionic" ]; then
 			# On-device builds without termux-exec are unsupported.
-			if ! grep -q "${TERMUX_PREFIX}/lib/libtermux-exec.so" <<< "${LD_PRELOAD-x}"; then
+			if [[ ":${LD_PRELOAD:-}:" != ":${TERMUX__PREFIX__LIB_DIR}/libtermux-exec"*".so:" ]]; then
 				termux_error_exit "On-device builds without termux-exec are not supported."
 			fi
 		fi
@@ -64,23 +65,9 @@ termux_step_setup_variables() {
 	# TERMUX_PKG_MAINTAINER should be explicitly set in build.sh of the package.
 	: "${TERMUX_PKG_MAINTAINER:="default"}"
 
-	if [ "x86_64" = "$TERMUX_ARCH" ] || [ "aarch64" = "$TERMUX_ARCH" ]; then
-		TERMUX_ARCH_BITS=64
-	else
-		TERMUX_ARCH_BITS=32
-	fi
-
-	if [ "$TERMUX_PACKAGE_LIBRARY" = "bionic" ]; then
-		TERMUX_HOST_PLATFORM="${TERMUX_ARCH}-linux-android"
-	else
-		TERMUX_HOST_PLATFORM="${TERMUX_ARCH}-linux-gnu"
-	fi
-	if [ "$TERMUX_ARCH" = "arm" ]; then
-		TERMUX_HOST_PLATFORM="${TERMUX_HOST_PLATFORM}eabi"
-		if [ "$TERMUX_PACKAGE_LIBRARY" = "glibc" ]; then
-			TERMUX_HOST_PLATFORM="${TERMUX_HOST_PLATFORM}hf"
-		fi
-	fi
+	termux_step_setup_arch_variables
+	TERMUX_REAL_ARCH="$TERMUX_ARCH"
+	TERMUX_REAL_HOST_PLATFORM="$TERMUX_HOST_PLATFORM"
 
 	if [ "$TERMUX_PACKAGE_LIBRARY" = "bionic" ]; then
 		if [ "$TERMUX_ON_DEVICE_BUILD" = "false" ] && [ ! -d "$NDK" ]; then
@@ -95,12 +82,8 @@ termux_step_setup_variables() {
 			if [ -n "${LD_PRELOAD-}" ]; then
 				unset LD_PRELOAD
 			fi
-			if ! $(echo "$PATH" | grep -q "^$TERMUX_PREFIX/bin"); then
-				if [ -d "${TERMUX_PREFIX}/bin" ]; then
-					export PATH="${TERMUX_PREFIX}/bin:${PATH}"
-				else
-					termux_error_exit "Glibc components are not installed, run './scripts/setup-termux-glibc.sh'"
-				fi
+			if [ ! -d "${TERMUX_PREFIX}/bin" ]; then
+				termux_error_exit "Glibc components are not installed, run './scripts/setup-termux-glibc.sh'"
 			fi
 		else
 			if [ ! -d "${CGCT_DIR}/${TERMUX_ARCH}/bin" ]; then
@@ -139,6 +122,9 @@ termux_step_setup_variables() {
 	TERMUX_PKG_BUILDDIR=$TERMUX_TOPDIR/$TERMUX_PKG_NAME/build
 	TERMUX_PKG_BUILD_DEPENDS=""
 	TERMUX_PKG_BUILD_IN_SRC=false
+	TERMUX_PKG_BUILD_MULTILIB=false # multilib-compilation (compilation of 32-bit packages for 64-bit devices)
+	TERMUX_PKG_BUILD_ONLY_MULTILIB=false # Specifies that the package is compiled only via multilib-compilation. Enabled automatically if multilib-compilation is enabled and the `TERMUX_PKG_EXCLUDED_ARCHES` variable contains `arm` and `i686` values.
+	TERMUX_PKG_MULTILIB_BUILDDIR=$TERMUX_TOPDIR/$TERMUX_PKG_NAME/multilib-build # path to the assembled components of the 32-bit package if multilib-compilation is enabled
 	TERMUX_PKG_CONFFILES=""
 	TERMUX_PKG_CONFLICTS="" # https://www.debian.org/doc/debian-policy/ch-relationships.html#s-conflicts
 	TERMUX_PKG_DEPENDS=""
@@ -151,7 +137,6 @@ termux_step_setup_variables() {
 	TERMUX_PKG_EXTRA_UNDEF_SYMBOLS_TO_CHECK="" # space-separated undefined symbols to check in termux_step_massaging
 	TERMUX_PKG_FORCE_CMAKE=false # if the package has autotools as well as cmake, then set this to prefer cmake
 	TERMUX_PKG_GIT_BRANCH="" # branch defaults to 'v$TERMUX_PKG_VERSION' unless this variable is defined
-	TERMUX_PKG_GO_USE_OLDER=false # set to true to use the older supported release of Go.
 	TERMUX_PKG_HAS_DEBUG=true # set to false if debug build doesn't exist or doesn't work, for example for python based packages
 	TERMUX_PKG_HOMEPAGE=""
 	TERMUX_PKG_HOSTBUILD=false # Set if a host build should be done in TERMUX_PKG_HOSTBUILD_DIR:
@@ -189,10 +174,32 @@ termux_step_setup_variables() {
 	TERMUX_PKG_PYTHON_BUILD_DEPS="" # python modules to be installed via build-pip
 	TERMUX_PKG_PYTHON_COMMON_DEPS="" # python modules to be installed via pip3 or build-pip
 	TERMUX_PYTHON_CROSSENV_PREFIX="$TERMUX_TOPDIR/python${TERMUX_PYTHON_VERSION}-crossenv-prefix-$TERMUX_PACKAGE_LIBRARY-$TERMUX_ARCH" # python modules dependency location (only used in non-devices)
-	TERMUX_PYTHON_HOME=$TERMUX_PREFIX/lib/python${TERMUX_PYTHON_VERSION} # location of python libraries
+	TERMUX_PYTHON_HOME=$TERMUX__PREFIX__LIB_DIR/python${TERMUX_PYTHON_VERSION} # location of python libraries
 	TERMUX_PKG_MESON_NATIVE=false
 	TERMUX_PKG_CMAKE_CROSSCOMPILING=true
+	TERMUX_PROOT_EXTRA_ENV_VARS="" # Extra environvent variables for proot command in termux_setup_proot
 
 	unset CFLAGS CPPFLAGS LDFLAGS CXXFLAGS
 	unset TERMUX_MESON_ENABLE_SOVERSION # setenv to enable SOVERSION suffix for shared libs built with Meson
+}
+
+# Setting architectural information according to the `TERMUX_ARCH` variable
+termux_step_setup_arch_variables() {
+	if [ "x86_64" = "$TERMUX_ARCH" ] || [ "aarch64" = "$TERMUX_ARCH" ]; then
+		TERMUX_ARCH_BITS=64
+	else
+		TERMUX_ARCH_BITS=32
+	fi
+
+	if [ "$TERMUX_PACKAGE_LIBRARY" = "bionic" ]; then
+		TERMUX_HOST_PLATFORM="${TERMUX_ARCH}-linux-android"
+	else
+		TERMUX_HOST_PLATFORM="${TERMUX_ARCH}-linux-gnu"
+	fi
+	if [ "$TERMUX_ARCH" = "arm" ]; then
+		TERMUX_HOST_PLATFORM="${TERMUX_HOST_PLATFORM}eabi"
+		if [ "$TERMUX_PACKAGE_LIBRARY" = "glibc" ]; then
+			TERMUX_HOST_PLATFORM="${TERMUX_HOST_PLATFORM}hf"
+		fi
+	fi
 }

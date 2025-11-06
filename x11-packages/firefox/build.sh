@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://www.mozilla.org/firefox
 TERMUX_PKG_DESCRIPTION="Mozilla Firefox web browser"
 TERMUX_PKG_LICENSE="MPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="134.0.2"
+TERMUX_PKG_VERSION="144.0.2"
 TERMUX_PKG_SRCURL=https://archive.mozilla.org/pub/firefox/releases/${TERMUX_PKG_VERSION}/source/firefox-${TERMUX_PKG_VERSION}.source.tar.xz
-TERMUX_PKG_SHA256=6c6eb7ff13fa689c5cace23a28533361d1ca29158329b6f1c2f2d1c91c53dd27
+TERMUX_PKG_SHA256=eac4722ed259008d73006c4894c18d2871702c661d14e27505812351df62806b
 # ffmpeg and pulseaudio are dependencies through dlopen(3):
 TERMUX_PKG_DEPENDS="ffmpeg, fontconfig, freetype, gdk-pixbuf, glib, gtk3, libandroid-shmem, libandroid-spawn, libc++, libcairo, libevent, libffi, libice, libicu, libjpeg-turbo, libnspr, libnss, libpixman, libsm, libvpx, libwebp, libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxrandr, libxtst, pango, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="libcpufeatures, libice, libsm"
@@ -16,7 +16,7 @@ termux_pkg_auto_update() {
 	local e=0
 	local api_url="https://download.mozilla.org/?product=firefox-latest&os=linux64&lang=en-US"
 	local api_url_r=$(curl -s "${api_url}")
-	local latest_version=$(echo "${api_url_r}" | sed -nE "s/.*firefox-(.*).tar.bz2.*/\1/p")
+	local latest_version=$(echo "${api_url_r}" | sed -nE "s/.*firefox-(.*).tar.xz.*/\1/p")
 	[[ -z "${api_url_r}" ]] && e=1
 	[[ -z "${latest_version}" ]] && e=1
 
@@ -47,25 +47,17 @@ termux_step_post_get_source() {
 	local f="media/ffvpx/config_unix_aarch64.h"
 	echo "Applying sed substitution to ${f}"
 	sed -E '/^#define (CONFIG_LINUX_PERF|HAVE_SYSCTL) /s/1$/0/' -i ${f}
+
+	# Update Cargo.toml to use the patched cc
+	sed -i 's|^\(\[patch\.crates-io\]\)$|\1\ncc = { path = "third_party/rust/cc" }|g' \
+		Cargo.toml
+	(
+		termux_setup_rust
+		cargo update -p cc
+	)
 }
 
 termux_step_pre_configure() {
-	# XXX: flang toolchain provides libclang.so
-	termux_setup_flang
-	local __fc_dir="$(dirname $(command -v $FC))"
-	local __flang_toolchain_folder="$(realpath "$__fc_dir"/..)"
-	if [ ! -d "$TERMUX_PKG_TMPDIR/firefox-toolchain" ]; then
-		rm -rf "$TERMUX_PKG_TMPDIR"/firefox-toolchain-tmp
-		mv "$__flang_toolchain_folder" "$TERMUX_PKG_TMPDIR"/firefox-toolchain-tmp
-
-		cp "$(command -v "$CC")" "$TERMUX_PKG_TMPDIR"/firefox-toolchain-tmp/bin/
-		cp "$(command -v "$CXX")" "$TERMUX_PKG_TMPDIR"/firefox-toolchain-tmp/bin/
-		cp "$(command -v "$CPP")" "$TERMUX_PKG_TMPDIR"/firefox-toolchain-tmp/bin/
-
-		mv "$TERMUX_PKG_TMPDIR"/firefox-toolchain-tmp "$TERMUX_PKG_TMPDIR"/firefox-toolchain
-	fi
-	export PATH="$TERMUX_PKG_TMPDIR/firefox-toolchain/bin:$PATH"
-
 	termux_setup_nodejs
 	termux_setup_rust
 
@@ -83,7 +75,7 @@ termux_step_pre_configure() {
 	export HOST_CC=$(command -v clang)
 	export HOST_CXX=$(command -v clang++)
 
-	export BINDGEN_CFLAGS="--target=$CCTERMUX_HOST_PLATFORM --sysroot=$TERMUX_PKG_TMPDIR/firefox-toolchain/sysroot"
+	export BINDGEN_CFLAGS="--target=$CCTERMUX_HOST_PLATFORM --sysroot=$TERMUX_STANDALONE_TOOLCHAIN/sysroot"
 	local env_name=BINDGEN_EXTRA_CLANG_ARGS_${CARGO_TARGET_NAME@U}
 	env_name=${env_name//-/_}
 	export $env_name="$BINDGEN_CFLAGS"
@@ -121,7 +113,7 @@ END
 }
 
 termux_step_make() {
-	./mach build
+	./mach build -j "$TERMUX_PKG_MAKE_PROCESSES"
 	./mach buildsymbols
 }
 

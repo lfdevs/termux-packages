@@ -2,10 +2,10 @@ TERMUX_PKG_HOMEPAGE=https://github.com/protobuf-c/protobuf-c
 TERMUX_PKG_DESCRIPTION="Protocol buffers C library"
 TERMUX_PKG_LICENSE="BSD 2-Clause"
 TERMUX_PKG_MAINTAINER="Henrik Grimler @Grimler91"
-TERMUX_PKG_VERSION="1.5.0"
+TERMUX_PKG_VERSION="1.5.2"
 TERMUX_PKG_REVISION=2
 TERMUX_PKG_SRCURL=https://github.com/protobuf-c/protobuf-c/releases/download/v${TERMUX_PKG_VERSION}/protobuf-c-${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=7b404c63361ed35b3667aec75cc37b54298d56dd2bcf369de3373212cc06fd98
+TERMUX_PKG_SHA256=e2c86271873a79c92b58fef7ebf8de1aa0df4738347a8bd5d4e65a80a16d0d24
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="abseil-cpp, libc++, libprotobuf, protobuf"
 TERMUX_PKG_BREAKS="libprotobuf-c-dev"
@@ -28,9 +28,6 @@ termux_step_post_get_source() {
 }
 
 termux_step_pre_configure() {
-	find protoc-c -name '*.h' | xargs -n 1 \
-		sed -i -E 's/GOOGLE_DISALLOW_EVIL_CONSTRUCTORS\(([^)]+)\)/\1(const \1\&) = delete; void operator=(const \1\&) = delete/g'
-
 	termux_setup_protobuf
 	export PROTOC=$(command -v protoc)
 

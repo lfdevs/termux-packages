@@ -3,6 +3,7 @@ TERMUX_PKG_DESCRIPTION="Modular wayland compositor library"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="@termux"
 TERMUX_PKG_VERSION="0.18.2"
+TERMUX_PKG_REVISION=1
 TERMUX_PKG_SRCURL=https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/${TERMUX_PKG_VERSION}/wlroots-${TERMUX_PKG_VERSION}.tar.bz2
 TERMUX_PKG_SHA256=a28061f7778f28f7be377fd4d6f0ebd58cb2a63b52460e9fde28e2ab43e80cab
 TERMUX_PKG_AUTO_UPDATE=true
@@ -23,7 +24,7 @@ termux_step_post_get_source() {
 }
 
 termux_step_pre_configure() {
-	export PATH="$TERMUX_PREFIX/opt/libwayland/cross/bin:$PATH"
+	termux_setup_wayland_cross_pkg_config_wrapper
 
 	# XXX: use alloca for shm_open
 	export CPPFLAGS+=" -Wno-alloca -Wno-strict-prototypes"

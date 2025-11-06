@@ -1,11 +1,12 @@
 TERMUX_PKG_HOMEPAGE=https://cmake.org/
 TERMUX_PKG_DESCRIPTION="Family of tools designed to build, test and package software"
 TERMUX_PKG_LICENSE="BSD 3-Clause"
+TERMUX_PKG_LICENSE_FILE="LICENSE.rst"
 TERMUX_PKG_MAINTAINER="@termux"
 # When updating version here, please update termux_setup_cmake.sh as well.
-TERMUX_PKG_VERSION="3.31.5"
-TERMUX_PKG_SRCURL=https://www.cmake.org/files/v${TERMUX_PKG_VERSION:0:4}/cmake-${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=66fb53a145648be56b46fa9e8ccade3a4d0dfc92e401e52ce76bdad1fea43d27
+TERMUX_PKG_VERSION="4.1.2"
+TERMUX_PKG_SRCURL=https://www.cmake.org/files/v${TERMUX_PKG_VERSION:0:3}/cmake-${TERMUX_PKG_VERSION}.tar.gz
+TERMUX_PKG_SHA256=643f04182b7ba323ab31f526f785134fb79cba3188a852206ef0473fee282a15
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="libarchive, libc++, libcurl, libexpat, jsoncpp, libuv, rhash, zlib"
 TERMUX_PKG_RECOMMENDS="clang, make"
@@ -26,7 +27,6 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 
 termux_pkg_auto_update() {
 	local TERMUX_SETUP_CMAKE="${TERMUX_SCRIPTDIR}/scripts/build/setup/termux_setup_cmake.sh"
-	local TERMUX_CMAKE_VERSION=$(grep "local TERMUX_CMAKE_VERSION=" "${TERMUX_SETUP_CMAKE}" | cut -d"=" -f2)
 	local TERMUX_REPOLOGY_DATA_FILE=$(mktemp)
 	python3 "${TERMUX_SCRIPTDIR}"/scripts/updates/api/dump-repology-data \
 		"${TERMUX_REPOLOGY_DATA_FILE}" "${TERMUX_PKG_NAME}" >/dev/null || \
@@ -35,8 +35,7 @@ termux_pkg_auto_update() {
 	if [[ "${latest_version}" == "null" ]]; then
 		latest_version="${TERMUX_PKG_VERSION}"
 	fi
-	if [[ "${latest_version}" == "${TERMUX_PKG_VERSION}" ]] && \
-		[[ "${latest_version}" == "${TERMUX_CMAKE_VERSION}" ]]; then
+	if [[ "${latest_version}" == "${TERMUX_PKG_VERSION}" ]]; then
 		echo "INFO: No update needed. Already at version '${TERMUX_PKG_VERSION}'."
 		rm -f "${TERMUX_REPOLOGY_DATA_FILE}"
 		return

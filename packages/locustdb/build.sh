@@ -4,7 +4,7 @@ TERMUX_PKG_LICENSE="Apache-2.0"
 TERMUX_PKG_LICENSE_FILE="LICENSE"
 TERMUX_PKG_MAINTAINER="@termux"
 TERMUX_PKG_VERSION="0.4.6"
-TERMUX_PKG_REVISION=1
+TERMUX_PKG_REVISION=2
 TERMUX_PKG_SRCURL=https://github.com/cswinter/LocustDB/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
 TERMUX_PKG_SHA256=db1ee671dab19c1226a0c2d56007fd186b5c6b2ce230b9c1775bba20e19d8c28
 TERMUX_PKG_AUTO_UPDATE=true
@@ -19,7 +19,7 @@ TERMUX_PKG_BUILD_IN_SRC=true
 #     |
 #     = note: `#[deny(arithmetic_overflow)]` on by default
 # ```
-TERMUX_PKG_BLACKLISTED_ARCHES="arm, i686"
+TERMUX_PKG_EXCLUDED_ARCHES="arm, i686"
 
 # Github CI seems pretty upset
 # Received request to deprovision: The request was cancelled by the remote provider.

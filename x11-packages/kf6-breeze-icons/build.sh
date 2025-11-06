@@ -2,11 +2,12 @@ TERMUX_PKG_HOMEPAGE='https://community.kde.org/Frameworks'
 TERMUX_PKG_DESCRIPTION='Breeze icon theme'
 TERMUX_PKG_LICENSE="GPL-3.0, LGPL-2.1"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="6.10.0"
-TERMUX_PKG_SRCURL=https://download.kde.org/stable/frameworks/${TERMUX_PKG_VERSION%.*}/breeze-icons-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=fe458eb957be655ea801d41f1dd3c4cfa829e7ba6040b38d69d09f6b69c31e2a
+TERMUX_PKG_VERSION="6.19.0"
+_KF6_MINOR_VERSION="${TERMUX_PKG_VERSION%.*}"
+TERMUX_PKG_SRCURL=https://download.kde.org/stable/frameworks/${_KF6_MINOR_VERSION}/breeze-icons-${TERMUX_PKG_VERSION}.tar.xz
+TERMUX_PKG_SHA256=2caca35c48271fdc641b328129e99448ae1fdabc447262a92e4805321d22aa4c
 TERMUX_PKG_DEPENDS="qt6-qtbase"
-TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${TERMUX_PKG_VERSION}), python-lxml, qt6-qtbase-cross-tools"
+TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${_KF6_MINOR_VERSION}), python-lxml, qt6-qtbase-cross-tools"
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_HOSTBUILD=true
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="

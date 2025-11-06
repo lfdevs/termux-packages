@@ -2,7 +2,7 @@ TERMUX_PKG_HOMEPAGE=https://crystal-lang.org
 TERMUX_PKG_DESCRIPTION="Fast and statically typed, compiled language with Ruby-like syntax"
 TERMUX_PKG_LICENSE="Apache-2.0"
 TERMUX_PKG_MAINTAINER="@HertzDevil"
-TERMUX_PKG_VERSION="1.15.0"
+TERMUX_PKG_VERSION="1.18.2"
 TERMUX_PKG_GIT_BRANCH=$TERMUX_PKG_VERSION
 TERMUX_PKG_SRCURL=git+https://github.com/crystal-lang/crystal
 TERMUX_PKG_AUTO_UPDATE=true
@@ -11,7 +11,7 @@ _LLVM_MAJOR_VERSION_NEXT=$((_LLVM_MAJOR_VERSION + 1))
 TERMUX_PKG_DEPENDS="libc++, libevent, libgc, libgmp, libiconv, libllvm (<< $_LLVM_MAJOR_VERSION_NEXT), libxml2, libyaml, openssl, pcre2, zlib"
 TERMUX_PKG_RECOMMENDS="clang, libffi, make, pkg-config"
 TERMUX_PKG_BUILD_IN_SRC=true
-TERMUX_PKG_BLACKLISTED_ARCHES="arm, i686, x86_64"
+TERMUX_PKG_EXCLUDED_ARCHES="arm, i686, x86_64"
 
 termux_step_make() {
 	local SHARDS_VERSION=0.18.0

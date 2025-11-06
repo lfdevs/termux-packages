@@ -2,12 +2,12 @@ TERMUX_PKG_HOMEPAGE=https://chromium.googlesource.com/angle/angle
 TERMUX_PKG_DESCRIPTION="A conformant OpenGL ES implementation for Windows, Mac, Linux, iOS and Android"
 TERMUX_PKG_LICENSE="BSD 3-Clause, Apache-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-_COMMIT_DATE=2025.01.28
-_COMMIT=919853748871efee5723acacedb10da321bf8441
-_COMMIT_POSISION=24755
+_COMMIT_DATE=2025.02.23
+_COMMIT=f09a19cebdaf04bddcd3101e9783207cb5cf3e13
+_COMMIT_POSISION=24923
 TERMUX_PKG_SRCURL=git+https://chromium.googlesource.com/angle/angle
 TERMUX_PKG_VERSION="2.1.$_COMMIT_POSISION-${_COMMIT:0:8}"
-TERMUX_PKG_REVISION=1
+TERMUX_PKG_REVISION=2
 
 TERMUX_PKG_HOSTBUILD=true
 
@@ -28,6 +28,7 @@ termux_step_get_source() {
 		touch "$TERMUX_PKG_CACHEDIR/.depot_tools-fetched"
 	fi
 	export PATH="$TERMUX_PKG_CACHEDIR/depot_tools:$PATH"
+	$TERMUX_PKG_CACHEDIR/depot_tools/ensure_bootstrap
 	export DEPOT_TOOLS_UPDATE=0
 
 	# Get source

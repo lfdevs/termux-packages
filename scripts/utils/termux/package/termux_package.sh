@@ -47,7 +47,8 @@ termux_package__is_package_on_device_build_supported() {
 ##
 termux_package__is_package_version_built() {
 
-    [ -e "$TERMUX_BUILT_PACKAGES_DIRECTORY/$1" ] && [ "$(cat "$TERMUX_BUILT_PACKAGES_DIRECTORY/$1")" = "$2" ]
+    # bash builtins only, a bit faster than [ -e $file ] && [ "$(cat $file)" == "smth" ]
+    [[ -f "$TERMUX_BUILT_PACKAGES_DIRECTORY/$1" ]] && [[ "$(< "$TERMUX_BUILT_PACKAGES_DIRECTORY/$1")" == "$2" ]]
     return $?
 
 }
@@ -55,7 +56,7 @@ termux_package__is_package_version_built() {
 
 
 ##
-# Check if the package name has a prefix called `glibc`.
+# Check if the package name has a prefix called `glibc` or `glibc32`.
 # .
 # .
 # **Parameters:**
@@ -70,7 +71,7 @@ termux_package__is_package_version_built() {
 termux_package__is_package_name_have_glibc_prefix() {
 
     for __pkgname_part in ${1//-/ }; do
-        if [ "$__pkgname_part" = "glibc" ]; then
+        if [ "$__pkgname_part" = "glibc" ] || [ "$__pkgname_part" = "glibc32" ]; then
             return 0
         fi
     done

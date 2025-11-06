@@ -1,6 +1,6 @@
---- ./node.gyp.orig	2025-01-21 06:34:59.000000000 +0530
-+++ ./node.gyp	2025-01-22 06:30:39.883038068 +0530
-@@ -559,7 +559,8 @@
+--- ./node.gyp.orig	2025-09-24 09:42:13.000000000 +0530
++++ ./node.gyp	2025-10-03 01:23:56.943768812 +0530
+@@ -543,7 +543,8 @@
        ],
  
        'sources': [
@@ -10,7 +10,7 @@
        ],
  
        'dependencies': [
-@@ -1039,313 +1040,7 @@
+@@ -1037,314 +1038,6 @@
          },
        ],
      }, # node_lib_target_name
@@ -44,11 +44,11 @@
 -        'test/fuzzers/fuzz_env.cc',
 -      ],
 -      'conditions': [
--        ['OS=="linux"', {
+-        ['OS=="linux" or OS=="openharmony"', {
 -          'ldflags': [ '-fsanitize=fuzzer' ]
 -        }],
 -        # Ensure that ossfuzz flag has been set and that we are on Linux
--        [ 'OS!="linux" or ossfuzz!="true"', {
+-        [ 'OS not in "linux openharmony" or ossfuzz!="true"', {
 -          'type': 'none',
 -        }],
 -        # Avoid excessive LTO
@@ -63,7 +63,6 @@
 -      'dependencies': [
 -        '<(node_lib_target_name)',
 -        'deps/histogram/histogram.gyp:histogram',
--        'deps/uvwasi/uvwasi.gyp:uvwasi',
 -      ],
 -      'includes': [
 -        'node.gypi'
@@ -74,7 +73,6 @@
 -        'deps/v8/include',
 -        'deps/cares/include',
 -        'deps/uv/include',
--        'deps/uvwasi/include',
 -        'test/cctest',
 -      ],
 -      'defines': [
@@ -87,11 +85,15 @@
 -        'test/fuzzers/fuzz_ClientHelloParser.cc',
 -      ],
 -      'conditions': [
--        ['OS=="linux"', {
+-        [ 'node_shared_uvwasi=="false"', {
+-          'dependencies': [ 'deps/uvwasi/uvwasi.gyp:uvwasi' ],
+-          'include_dirs': [ 'deps/uvwasi/include' ],
+-        }],
+-        ['OS=="linux" or OS=="openharmony"', {
 -          'ldflags': [ '-fsanitize=fuzzer' ]
 -        }],
 -        # Ensure that ossfuzz flag has been set and that we are on Linux
--        [ 'OS!="linux" or ossfuzz!="true"', {
+-        [ 'OS not in "linux openharmony" or ossfuzz!="true"', {
 -          'type': 'none',
 -        }],
 -        # Avoid excessive LTO
@@ -107,7 +109,6 @@
 -        '<(node_lib_target_name)',
 -        'deps/googletest/googletest.gyp:gtest_prod',
 -        'deps/histogram/histogram.gyp:histogram',
--        'deps/uvwasi/uvwasi.gyp:uvwasi',
 -        'deps/nbytes/nbytes.gyp:nbytes',
 -      ],
 -      'includes': [
@@ -119,7 +120,6 @@
 -        'deps/v8/include',
 -        'deps/cares/include',
 -        'deps/uv/include',
--        'deps/uvwasi/include',
 -        'test/cctest',
 -      ],
 -      'defines': [
@@ -132,11 +132,15 @@
 -        'test/fuzzers/fuzz_strings.cc',
 -      ],
 -      'conditions': [
--        ['OS=="linux"', {
+-        [ 'node_shared_uvwasi=="false"', {
+-          'dependencies': [ 'deps/uvwasi/uvwasi.gyp:uvwasi' ],
+-          'include_dirs': [ 'deps/uvwasi/include' ],
+-        }],
+-        ['OS=="linux" or OS=="openharmony"', {
 -          'ldflags': [ '-fsanitize=fuzzer' ]
 -        }],
 -        # Ensure that ossfuzz flag has been set and that we are on Linux
--        [ 'OS!="linux" or ossfuzz!="true"', {
+-        [ 'OS not in "linux openharmony" or ossfuzz!="true"', {
 -          'type': 'none',
 -        }],
 -        # Avoid excessive LTO
@@ -155,6 +159,7 @@
 -        'deps/googletest/googletest.gyp:gtest_main',
 -        'deps/histogram/histogram.gyp:histogram',
 -        'deps/nbytes/nbytes.gyp:nbytes',
+-        'tools/v8_gypfiles/abseil.gyp:abseil',
 -      ],
 -
 -      'includes': [
@@ -186,17 +191,26 @@
 -          'dependencies': [
 -            'deps/ncrypto/ncrypto.gyp:ncrypto',
 -          ],
--          'sources': [ '<@(node_cctest_openssl_sources)' ],
+-        }, {
+-          'sources!': [ '<@(node_cctest_openssl_sources)' ],
 -        }],
 -        ['v8_enable_inspector==1', {
 -          'defines': [
 -            'HAVE_INSPECTOR=1',
 -          ],
--          'sources': [ '<@(node_cctest_inspector_sources)' ],
+-          'include_dirs': [
+-            # TODO(legendecas): make node_inspector.gypi a dependable target.
+-            '<(SHARED_INTERMEDIATE_DIR)', # for inspector
+-            '<(SHARED_INTERMEDIATE_DIR)/src', # for inspector
+-          ],
+-          'dependencies': [
+-            'deps/inspector_protocol/inspector_protocol.gyp:crdtp',
+-          ],
 -        }, {
 -           'defines': [
 -             'HAVE_INSPECTOR=0',
--           ]
+-           ],
+-           'sources!': [ '<@(node_cctest_inspector_sources)' ],
 -        }],
 -        ['OS=="solaris"', {
 -          'ldflags': [ '-I<(SHARED_INTERMEDIATE_DIR)' ]
@@ -281,29 +295,9 @@
 -    }, # embedtest
 -
 -    {
--      'target_name': 'sqlite_extension',
--      'type': 'shared_library',
--      'sources': [
--        'test/sqlite/extension.c'
--      ],
--
--      'include_dirs': [
--        'test/sqlite',
--        'deps/sqlite',
--      ],
--
--      'cflags': [
--        '-fPIC',
--        '-Wall',
--        '-Wextra',
--        '-O3',
--      ],
--    }, # sqlitetest
--
--    {
 -      'target_name': 'overlapped-checker',
 -      'type': 'executable',
- 
+-
 -      'conditions': [
 -        ['OS=="win"', {
 -          'sources': [
@@ -321,10 +315,17 @@
 -        }],
 -      ]
 -    }, # overlapped-checker
+-    {
+-      'target_name': 'nop',
+-      'type': 'executable',
+-      'sources': [
+-        'test/nop/nop.c',
+-      ]
+-    }, # nop
      {
        'target_name': 'node_js2c',
        'type': 'executable',
-@@ -1382,70 +1077,6 @@
+@@ -1381,70 +1074,6 @@
          }],
        ]
      },

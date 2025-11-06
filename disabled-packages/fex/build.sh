@@ -7,7 +7,7 @@ TERMUX_PKG_SRCURL=git+https://github.com/FEX-Emu/FEX
 TERMUX_PKG_GIT_BRANCH=FEX-${TERMUX_PKG_VERSION}
 TERMUX_PKG_DEPENDS="libandroid-shmem, libc++"
 TERMUX_PKG_BUILD_DEPENDS="gdb"
-TERMUX_PKG_BLACKLISTED_ARCHES="arm, i686, x86_64"
+TERMUX_PKG_EXCLUDED_ARCHES="arm, i686, x86_64"
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -DBUILD_TESTS=OFF
@@ -25,7 +25,7 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 
 termux_pkg_auto_update() {
 	local latest_tag="$(termux_github_api_get_tag "${TERMUX_PKG_SRCURL}")"
-	[[ -z "${latest_tag}" ]] && termux_error_exit "ERROR: Unable to get tag from ${TERMUX_PKG_SRCURL}"
+	[[ -z "${latest_tag}" ]] && termux_error_exit "Unable to get tag from ${TERMUX_PKG_SRCURL}"
 	termux_pkg_upgrade_version "${latest_tag#FEX-}"
 }
 

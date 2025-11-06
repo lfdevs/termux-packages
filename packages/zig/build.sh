@@ -3,9 +3,9 @@ TERMUX_PKG_DESCRIPTION="General-purpose programming language and toolchain"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="zig/LICENSE"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="0.13.0"
+TERMUX_PKG_VERSION="0.15.1"
 TERMUX_PKG_SRCURL=https://github.com/ziglang/zig/releases/download/${TERMUX_PKG_VERSION}/zig-bootstrap-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=cd446c084b5da7bc42e8ad9b4e1c910a957f2bf3f82bcc02888102cd0827c139
+TERMUX_PKG_SHA256=4c0cfbcf12da144955761ca43f89e3c74956bce978694fc1d0a63555f5c0a199
 TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_AUTO_UPDATE=true
 
@@ -20,8 +20,14 @@ termux_step_pre_configure() {
 	export TERMUX_PKG_MAKE_PROCESSES
 
 	# zig 0.11.0+ uses 3 stages bootstrapping build system
-	# which NDK cant be used anymore
-	unset AS CC CFLAGS CPP CPPFLAGS CXX CXXFLAGS LD LDFLAGS
+	# for which NDK can't be used anymore
+	unset AS CC CFLAGS CPP CPPFLAGS CXX CXXFLAGS LD LDFLAGS \
+		PKGCONFIG PKG_CONFIG PKG_CONFIG_LIBDIR
+
+	# todo: if zig ever builds on-device, implement whatever would work there as an else block
+	if [[ "$TERMUX_ON_DEVICE_BUILD" == "false" ]]; then
+		export PKG_CONFIG="/usr/bin/pkg-config"
+	fi
 }
 
 termux_step_make() {
@@ -37,9 +43,10 @@ termux_step_make_install() {
 termux_step_post_massage() {
 	if [[ "${TERMUX_ON_DEVICE_BUILD}" == "true" ]]; then return; fi
 	if [[ -z "$(find /proc/sys/fs/binfmt_misc -type f -name 'qemu-*')" ]]; then return; fi
-	# self test
-	pushd "${TERMUX_PKG_TMPDIR}"
-	"$TERMUX_PKG_MASSAGEDIR/$TERMUX_PREFIX_CLASSICAL/bin/zig" version
-	"$TERMUX_PKG_MASSAGEDIR/$TERMUX_PREFIX_CLASSICAL/bin/zig" init
-	popd
+
+	( # self test
+		cd "${TERMUX_PKG_TMPDIR}" || termux_error_exit "Failed to perform selftest for Zig $TERMUX_PKG_VERSION"
+		"$TERMUX_PKG_MASSAGEDIR/$TERMUX_PREFIX_CLASSICAL/bin/zig" version
+		"$TERMUX_PKG_MASSAGEDIR/$TERMUX_PREFIX_CLASSICAL/bin/zig" init
+	)
 }

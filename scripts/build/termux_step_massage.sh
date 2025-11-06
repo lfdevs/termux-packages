@@ -1,6 +1,8 @@
 termux_step_massage() {
 	[ "$TERMUX_PKG_METAPACKAGE" = "true" ] && return
 
+	local file
+
 	cd "$TERMUX_PKG_MASSAGEDIR/$TERMUX_PREFIX_CLASSICAL"
 
 	local ADDING_PREFIX=""
@@ -26,8 +28,12 @@ termux_step_massage() {
 	# Remove cache file created by gtk-update-icon-cache:
 	rm -f share/icons/hicolor/icon-theme.cache
 
-	# Remove locale files we're not interested in::
+	# Remove locale files we're not interested in:
 	rm -Rf share/locale
+
+	# Remove ldconfig cache:
+	rm -f glibc/etc/ld{,32}.so.cache
+	rm -rf glibc/var/cache/ldconfig{,32}
 
 	# `update-mime-database` updates NOT ONLY "$PREFIX/share/mime/mime.cache".
 	# Simply removing this specific file does not solve the issue.
@@ -49,44 +55,65 @@ termux_step_massage() {
 
 	if [ "$TERMUX_PACKAGE_LIBRARY" = "bionic" ]; then
 		if [ "$TERMUX_PKG_NO_STRIP" != "true" ] && [ "$TERMUX_DEBUG_BUILD" = "false" ]; then
-			# Strip binaries. file(1) may fail for certain unusual files, so disable pipefail.
-			set +e +o pipefail
-			find . \( -path "./bin/*" -o -path "./lib/*" -o -path "./libexec/*" \) -type f |
-				xargs -r file | grep -E "ELF .+ (executable|shared object)" | cut -f 1 -d : |
-				xargs -r "$STRIP" --strip-unneeded --preserve-dates
-			set -e -o pipefail
+			termux_step_strip_elf_symbols
 		fi
 
 		if [ "$TERMUX_PKG_NO_ELF_CLEANER" != "true" ]; then
-			# Remove entries unsupported by Android's linker:
-			find . \( -path "./bin/*" -o -path "./lib/*" -o -path "./libexec/*" -o -path "./opt/*" \) -type f -print0 | xargs -r -0 \
-				"$TERMUX_ELF_CLEANER" --api-level $TERMUX_PKG_API_LEVEL
+			termux_step_elf_cleaner
 		fi
-	fi
-
-	local pattern=""
-	for file in ${TERMUX_PKG_NO_SHEBANG_FIX_FILES}; do
-		if [[ -z "${pattern}" ]]; then
-			pattern="${file}"
-			continue
-		fi
-		pattern+='|'"${file}"
-	done
-	if [[ -n "${pattern}" ]]; then
-		pattern='(|./)('"${pattern}"')$'
 	fi
 
 	if [ "$TERMUX_PKG_NO_SHEBANG_FIX" != "true" ]; then
+		local no_shebang_replace_full_regex="" no_shebang_replace_regex
+		# Assume files are a regex list and special characters in paths in each regex are already escaped.
+		if [[ -n "$TERMUX_PKG_NO_SHEBANG_FIX_FILES" ]]; then
+			while IFS= read -r no_shebang_replace_regex; do
+				[[ -n "$no_shebang_replace_full_regex" ]] && no_shebang_replace_full_regex+='|'
+				no_shebang_replace_full_regex+="($no_shebang_replace_regex)"
+			done < <(printf "%s\n" "$TERMUX_PKG_NO_SHEBANG_FIX_FILES")
+			if [[ -n "$no_shebang_replace_full_regex" ]]; then
+				no_shebang_replace_full_regex='(|./)('"$no_shebang_replace_full_regex"')$'
+			fi
+		fi
+
+		local prefix_escaped shebang_already_valid_regex header_line shebang_match
+		local shebang_regex='^#!.*/bin/.*'
+
+		# Escape '\$[](){}|^.?+*' with backslashes.
+		prefix_escaped="$(printf "%s" "$TERMUX_PREFIX_CLASSICAL" | sed -zE -e 's/[][\.|$(){}?+*^]/\\&/g')"
+		shebang_already_valid_regex='^#! ?((/system/)|('"$prefix_escaped"'/))'
+
 		# Fix shebang paths:
-		while IFS= read -r -d '' file; do
-			if [[ -n "${pattern}" ]] && [[ -n "$(echo "${file}" | grep -E "${pattern}")" ]]; then
-				echo "INFO: Skip shebang fix for ${file}"
-				continue
+		while IFS= read -rd '' file; do
+			# Ideally the shebang length should be limited to `BINPRM_BUF_SIZE = 256` for Linux kernel `>= 5.1`,
+			# but Termux increases the limit to `TERMUX__FILE_HEADER__BUFFER_SIZE = 340` with `termux-exec` to
+			# accommodate for longer `TERMUX__ROOTFS` as per `TERMUX__ROOTFS_DIR___MAX_LEN = 86` (check `ExecIntercept.h`).
+			# However, a package may use the build directory path for dynamically setting the shebang at build time,
+			# so use `PATH_MAX = 4096` as length limit instead, as a shorter limit like `256`/`340` may prevent reading the
+			# entire header line if build directory path is longer and `shebang_regex` will fail to match and skip shebang
+			# replacement. Additionally, we first read first `2` characters and see if they match `#!`, before reading
+			# rest of the header line to avoid wasting time reading `4096` characters for non-shebang files.
+			# `|| :` is used for second `read` to include files with just a shebang line as `read` will exit with `1` for those due to EOF.
+			# For example, `pip` from `python-pip` package is set with the following shebang at build time:
+			# `#!/home/builder/.termux-build/python3.12-crossenv-prefix-bionic-x86_64/cross/bin/python3.12`
+			header_line=""
+			{ { read -r -n 2 header_line && [[ "$header_line" == "#!" ]]; } || continue; read -r -n 4096 header_line || :; } < "$file"
+			header_line="#!${header_line}"
+			if [[ "${#header_line}" -ge 3 && "$header_line" =~ $shebang_regex ]]; then
+				shebang_match="${BASH_REMATCH[0]}"
+				if [[ -n "$shebang_match" ]]; then
+					if [[ "$shebang_match" =~ $shebang_already_valid_regex ]]; then
+						echo "INFO: Skip shebang fix for '$file' as shebang '$shebang_match' already valid"
+						continue
+					fi
+					if [[ -n "$no_shebang_replace_full_regex" ]] && [[ "$file" =~ $no_shebang_replace_full_regex ]]; then
+						echo "INFO: Skip shebang fix for '$file' as its excluded"
+						continue
+					fi
+					sed --follow-symlinks -i -E "1 s@^#\!(.*)/bin/(.*)@#\!$TERMUX_PREFIX/bin/\2@" "$file"
+				fi
 			fi
-			if head -c 100 "$file" | head -n 1 | grep -E "^#!.*/bin/.*" | grep -q -E -v -e "^#! ?/system" -e "^#! ?$TERMUX_PREFIX_CLASSICAL"; then
-				sed --follow-symlinks -i -E "1 s@^#\!(.*)/bin/(.*)@#\!$TERMUX_PREFIX/bin/\2@" "$file"
-			fi
-		done < <(find -L . -type f -print0)
+		done < <(find . -type f -print0)
 	fi
 
 	# Delete the info directory file.
@@ -156,6 +183,37 @@ termux_step_massage() {
 		fi
 	fi
 
+	# Remove duplicate headers from `include32/` directory
+	if [[ -d ./${ADDING_PREFIX}/${TERMUX__PREFIX__MULTI_INCLUDE_SUBDIR} && -d ${TERMUX__PREFIX__BASE_INCLUDE_DIR} ]]; then
+		local hpath
+		for hpath in $(find ./${ADDING_PREFIX}/${TERMUX__PREFIX__MULTI_INCLUDE_SUBDIR} -type f); do
+			local h=$(sed "s|./${ADDING_PREFIX}/${TERMUX__PREFIX__MULTI_INCLUDE_SUBDIR}/||g" <<< "$hpath")
+			if [[ -f "${TERMUX__PREFIX__BASE_INCLUDE_DIR}/${h}" && \
+				"$(md5sum < "${hpath}")" = "$(md5sum < "${TERMUX__PREFIX__BASE_INCLUDE_DIR}/${h}")" ]]; then
+				rm "${hpath}"
+			fi
+		done
+	fi
+
+	# Configure pkgconfig files for proper multilib-compilation
+	if [[ -d ./${ADDING_PREFIX}/${TERMUX__PREFIX__MULTI_LIB_SUBDIR}/pkgconfig ]]; then
+		local pc
+		for pc in $(grep -s -r -l "^includedir=.*/${TERMUX__PREFIX__MULTI_INCLUDE_SUBDIR}" ./${ADDING_PREFIX}/${TERMUX__PREFIX__MULTI_LIB_SUBDIR}/pkgconfig); do
+			local pc_cflags="$(grep '^Cflags:' "${pc}" | awk -F ':' '{printf $2 "\n"}')"
+			if ! grep -q ' -I' <<< "${pc_cflags}"; then
+				continue
+			fi
+			local pc_multilib_path="$(grep '^includedir=' "${pc}" | sed "s|${TERMUX_PREFIX}|\${prefix}|g" | awk -F '{prefix}/include' '{printf $2}')"
+			local pc_edit_cflags="$(sed "s|\${includedir}|\${includedir}${pc_multilib_path}|g" <<< "${pc_cflags}")"
+			local pc_new_cflags="$(tr ' ' '\n' <<< "${pc_edit_cflags}" | sed 's|\({includedir}\)32|\1|gp; s|\(/include\)32|\1|gp; d' | tr '\n' ' ')"
+			sed -i -e "s|\(^includedir=.*/\)${TERMUX__PREFIX__MULTI_INCLUDE_SUBDIR}\(.*\)|\1include|g" \
+				-e "s|^Cflags:${pc_cflags}$|Cflags:${pc_edit_cflags} ${pc_new_cflags::-1}|g" \
+				"${pc}"
+			# Apply the modified pkgconfig to the system for proper multilib-compilation work
+			cp -r "${pc}" "${TERMUX__PREFIX__MULTI_LIB_DIR}/pkgconfig"
+		done
+	fi
+
 	# Check for directory "$PREFIX/man" which indicates packaging error.
 	if [ -d "./${ADDING_PREFIX}man" ]; then
 		termux_error_exit "Package contains directory \"\$PREFIX/man\" ($TERMUX_PREFIX/man). Use \"\$PREFIX/share/man\" ($TERMUX_PREFIX/share/man) instead."
@@ -209,7 +267,13 @@ termux_step_massage() {
 		local nproc=$(nproc)
 		echo "INFO: Identifying files with nproc=${nproc}"
 		local t0=$(get_epoch)
-		local files=$(find . -type f)
+		local files; files="$(IFS=; find . -type f -print0 | \
+			while read -r -d '' file; do
+				# Find files with ELF or static library signature in the first 4 bytes bytes
+				read -rN4 hdr < "$file" || continue
+				[[ $hdr == $'\x7fELF' || $hdr == '!<ar' ]] && printf '%s\n' "$file" || :
+			done
+		)"
 		# use bash to see if llvm-readelf crash
 		# https://github.com/llvm/llvm-project/issues/89534
 		local valid=$(echo "${files}" | xargs -P"${nproc}" -i bash -c 'if ${READELF} -h "{}" &>/dev/null; then echo "{}"; fi')
@@ -243,10 +307,10 @@ termux_step_massage() {
 			local e=0
 			local c=0
 			local valid_s=$(echo "${valid}" | sort)
-			local f excluded_f
-			while IFS= read -r f; do
+			local excluded_file
+			while IFS= read -r file; do
 				# exclude object, static files
-				case "${f}" in
+				case "${file}" in
 				*.a) (( e &= ~1 )) || : ;;
 				*.dll) (( e &= ~1 )) || : ;;
 				*.o) (( e &= ~1 )) || : ;;
@@ -255,21 +319,21 @@ termux_step_massage() {
 				*.syso) (( e &= ~1 )) || : ;;
 				*) (( e |= 1 )) || : ;;
 				esac
-				while IFS= read -r excluded_f; do
-					[[ "${f}" == ${excluded_f} ]] && (( e &= ~1 )) && break
+				while IFS= read -r excluded_file; do
+					[[ "${file}" == ${excluded_file} ]] && (( e &= ~1 )) && break
 				done < <(echo "${TERMUX_PKG_UNDEF_SYMBOLS_FILES}")
 				[[ "${TERMUX_PKG_UNDEF_SYMBOLS_FILES}" == "error" ]] && (( e |= 1 )) || :
-				[[ $(( e & 1 )) == 0 ]] && echo "SKIP: ${f}" && continue
-				local undef_sym=$(${READELF} -s "${f}" | grep -Ef "${pattern_file_undef}")
+				[[ $(( e & 1 )) == 0 ]] && echo "SKIP: ${file}" && continue
+				local undef_sym=$(${READELF} -s "${file}" | grep -Ef "${pattern_file_undef}")
 				if [[ -n "${undef_sym}" ]]; then
 					((c++)) || :
 					if [[ $(( e & 1 )) != 0 ]]; then
-						echo -e "ERROR: ${f} contains undefined symbols:\n${undef_sym}" >&2
+						echo -e "ERROR: ${file} contains undefined symbols:\n${undef_sym}" >&2
 						(( e |= 2 )) || :
 					else
 						local undef_symu=$(echo "${undef_sym}" | awk '{ print $8 }' | sort | uniq)
 						local undef_symu_len=$(echo ${undef_symu} | wc -w)
-						echo "SKIP: ${f} contains undefined symbols: ${undef_symu_len}" >&2
+						echo "SKIP: ${file} contains undefined symbols: ${undef_symu_len}" >&2
 					fi
 				fi
 			done < <(echo "${valid_s}")
@@ -288,10 +352,9 @@ termux_step_massage() {
 			local e=0
 			local c=0
 			local valid_s=$(echo "${valid}" | sort)
-			local f
-			while IFS= read -r f; do
+			while IFS= read -r file; do
 				# exclude object, static files
-				case "${f}" in
+				case "${file}" in
 				*.a) (( e &= ~1 )) || : ;;
 				*.dll) (( e &= ~1 )) || : ;;
 				*.o) (( e &= ~1 )) || : ;;
@@ -300,11 +363,11 @@ termux_step_massage() {
 				*.syso) (( e &= ~1 )) || : ;;
 				*) (( e |= 1 )) || : ;;
 				esac
-				[[ $(( e & 1 )) == 0 ]] && echo "SKIP: ${f}" && continue
-				local openmp_sym=$(${READELF} -s "${f}" | grep -Ef "${pattern_file_openmp}")
+				[[ $(( e & 1 )) == 0 ]] && echo "SKIP: ${file}" && continue
+				local openmp_sym=$(${READELF} -s "${file}" | grep -Ef "${pattern_file_openmp}")
 				if [[ -n "${openmp_sym}" ]]; then
 					((c++)) || :
-					echo -e "INFO: ${f} contains OpenMP symbols: $(echo "${openmp_sym}" | wc -l)" >&2
+					echo -e "INFO: ${file} contains OpenMP symbols: $(echo "${openmp_sym}" | wc -l)" >&2
 				fi
 			done < <(echo "${valid_s}")
 			local t1=$(get_epoch)
@@ -318,10 +381,9 @@ termux_step_massage() {
 			local t0=$(get_epoch)
 			local valid_s=$(echo "${valid}" | sort)
 			{
-				local f
-				while IFS= read -r f; do
-					local f_needed=$(${READELF} -d "${f}" 2>/dev/null | sed -ne "s|.*NEEDED.*\[\(.*\)\].*|\1|p" | sort | uniq | tr "\n" " " | sed -e "s/ /, /g")
-					echo "ERROR: ${f}: ${f_needed%, }"
+				while IFS= read -r file; do
+					local needed_file=$(${READELF} -d "${file}" 2>/dev/null | sed -ne "s|.*NEEDED.*\[\(.*\)\].*|\1|p" | sort | uniq | tr "\n" " " | sed -e "s/ /, /g")
+					echo "ERROR: ${file}: ${needed_file%, }"
 				done < <(echo "${valid_s}")
 			} | grep libomp.so >&2
 			local t1=$(get_epoch)
@@ -337,11 +399,6 @@ termux_step_massage() {
 		termux_create_debian_subpackages
 	elif [ "$TERMUX_PACKAGE_FORMAT" = "pacman" ]; then
 		termux_create_pacman_subpackages
-	fi
-
-	# Remove unnecessary files in haskell packages:
-	if ! [[ $TERMUX_PKG_NAME =~ ghc|ghc-libs ]]; then
-		test -f ./${ADDING_PREFIX}lib/ghc-*/settings && rm -rf ./${ADDING_PREFIX}lib/ghc-*/settings
 	fi
 
 	# .. remove empty directories (NOTE: keep this last):

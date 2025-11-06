@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://timg.sh/
 TERMUX_PKG_DESCRIPTION="A terminal image and video viewer"
 TERMUX_PKG_LICENSE="GPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="1.6.1"
+TERMUX_PKG_VERSION="1.6.3"
 TERMUX_PKG_SRCURL=https://github.com/hzeller/timg/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=08147c41ce4cea61b6c494ad746e743b7c4501cfd247bec5134e8ede773bf2af
+TERMUX_PKG_SHA256=59c908867f18c81106385a43065c232e63236e120d5b2596b179ce56340d7b01
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="ffmpeg, graphicsmagick, libc++, libcairo, libdeflate, libjpeg-turbo, libexif, librsvg, libsixel, poppler, zlib"
 

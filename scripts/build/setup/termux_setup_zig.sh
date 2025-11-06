@@ -13,14 +13,27 @@ termux_setup_zig() {
 
 	local ZIG_TXZ_SHA256
 	case "${TERMUX_ZIG_VERSION}" in
+	0.15.1) ZIG_TXZ_SHA256=c61c5da6edeea14ca51ecd5e4520c6f4189ef5250383db33d01848293bfafe05 ;;
+	0.14.1) ZIG_TXZ_SHA256=24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c ;;
+	0.14.0) ZIG_TXZ_SHA256=473ec26806133cf4d1918caf1a410f8403a13d979726a9045b421b685031a982 ;;
 	0.13.0) ZIG_TXZ_SHA256=d45312e61ebcc48032b77bc4cf7fd6915c11fa16e4aad116b66c9468211230ea ;;
 	0.12.0) ZIG_TXZ_SHA256=c7ae866b8a76a568e2d5cfd31fe89cdb629bdd161fdd5018b29a4a0a17045cad ;;
 	0.11.0) ZIG_TXZ_SHA256=2d00e789fec4f71790a6e7bf83ff91d564943c5ee843c5fd966efc474b423047 ;;
-	0.9.1) ZIG_TXZ_SHA256=be8da632c1d3273f766b69244d80669fe4f5e27798654681d77c992f17c237d7 ;;
+	0.9.1 ) ZIG_TXZ_SHA256=be8da632c1d3273f766b69244d80669fe4f5e27798654681d77c992f17c237d7 ;;
 	*) termux_error_exit "Please add ${TERMUX_ZIG_VERSION} archive checksum to termux_setup_zig and update patches in packages/zig" ;;
 	esac
 
-	local ZIG_TXZ_URL=https://ziglang.org/download/${TERMUX_ZIG_VERSION}/zig-linux-x86_64-${TERMUX_ZIG_VERSION}.tar.xz
+	# Zig switched the target format for its tarballs in 0.14.1
+	local ZIG_TXZ_URL
+	case "${TERMUX_ZIG_VERSION}" in
+		0.9.1|0.10.0|0.11.0|0.12.0|0.13.0|0.14.0) # Old format: `zig-${platform}-${arch}-${version}.tar.xz`
+			ZIG_TXZ_URL=https://ziglang.org/download/${TERMUX_ZIG_VERSION}/zig-linux-x86_64-${TERMUX_ZIG_VERSION}.tar.xz
+		;;
+		*) # New format: `zig-${arch}-${platform}-${version}.tar.xz`
+			ZIG_TXZ_URL=https://ziglang.org/download/${TERMUX_ZIG_VERSION}/zig-x86_64-linux-${TERMUX_ZIG_VERSION}.tar.xz
+		;;
+	esac
+
 	local ZIG_TXZ_FILE=${TERMUX_PKG_TMPDIR}/zig-${TERMUX_ZIG_VERSION}.tar.xz
 	local ZIG_FOLDER=${TERMUX_COMMON_CACHEDIR}/zig-${TERMUX_ZIG_VERSION}
 	if [[ "${TERMUX_PACKAGES_OFFLINE-false}" == "true" ]]; then

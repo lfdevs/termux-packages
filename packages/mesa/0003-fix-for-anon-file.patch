@@ -2,7 +2,7 @@ Fallback to `@TERMUX_PREFIX@/tmp` if env `XDG_RUNTIME_DIR` is not set.
 
 --- a/src/util/anon_file.c
 +++ b/src/util/anon_file.c
-@@ -136,6 +136,11 @@
+@@ -137,6 +137,11 @@
     char *name;
  
     path = getenv("XDG_RUNTIME_DIR");

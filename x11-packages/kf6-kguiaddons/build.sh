@@ -2,13 +2,16 @@ TERMUX_PKG_HOMEPAGE=https://www.kde.org/
 TERMUX_PKG_DESCRIPTION="The KDE GUI Add-ons"
 TERMUX_PKG_LICENSE="LGPL-2.1"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="6.10.0"
-TERMUX_PKG_SRCURL="https://download.kde.org/stable/frameworks/${TERMUX_PKG_VERSION%.*}/kguiaddons-${TERMUX_PKG_VERSION}.tar.xz"
-TERMUX_PKG_SHA256=b3be04077313e559c5a8f66491d5d286cefe947aaf7c8937544ce85af4853ffa
+TERMUX_PKG_VERSION="6.19.0"
+TERMUX_PKG_REVISION=1
+_KF6_MINOR_VERSION="${TERMUX_PKG_VERSION%.*}"
+TERMUX_PKG_SRCURL="https://download.kde.org/stable/frameworks/${_KF6_MINOR_VERSION}/kguiaddons-${TERMUX_PKG_VERSION}.tar.xz"
+TERMUX_PKG_SHA256=ac43416c5ba790c898cd3b806c6babe45b41df72ecc65a4328cc1a532ca8a1e6
 TERMUX_PKG_AUTO_UPDATE=true
-TERMUX_PKG_DEPENDS="libc++, libwayland, libx11, qt6-qtbase, qt6-qtwayland"
-TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${TERMUX_PKG_VERSION}), plasma-wayland-protocols, qt6-qttools"
+TERMUX_PKG_DEPENDS="libc++, libwayland, libx11, qt6-qtbase, qt6-qtdeclarative"
+TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${_KF6_MINOR_VERSION}), plasma-wayland-protocols, qt6-qttools"
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
+-DBUILD_PYTHON_BINDINGS=OFF
 -DCMAKE_SYSTEM_NAME=Linux
 -DKDE_INSTALL_QMLDIR=lib/qt6/qml
 -DKDE_INSTALL_QTPLUGINDIR=lib/qt6/plugins

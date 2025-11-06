@@ -1,69 +1,123 @@
-TERMUX_PKG_HOMEPAGE=https://github.com/openjdk/mobile
+TERMUX_PKG_HOMEPAGE=https://openjdk.java.net
 TERMUX_PKG_DESCRIPTION="Java development kit and runtime"
 TERMUX_PKG_LICENSE="GPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION=17.0
-TERMUX_PKG_REVISION=37
-_COMMIT=82234f890786d49c49cf4ecbcb09c47bd9bea7ed
-TERMUX_PKG_SRCURL=https://github.com/openjdk/mobile/archive/$_COMMIT.tar.gz
-TERMUX_PKG_SHA256=5b298148a26e754120c6dfe699056d0609fc6ed92bfc858dc2ba4909ef6e791b
-TERMUX_PKG_AUTO_UPDATE=false
-TERMUX_PKG_DEPENDS="libandroid-shmem, libandroid-spawn, libiconv, libjpeg-turbo, zlib"
-TERMUX_PKG_BUILD_DEPENDS="cups, fontconfig, libxrandr, libxt, xorgproto"
+TERMUX_PKG_VERSION="17.0.17"
+TERMUX_PKG_REVISION=1
+TERMUX_PKG_SRCURL=https://github.com/openjdk/jdk17u/archive/refs/tags/jdk-${TERMUX_PKG_VERSION}-ga.tar.gz
+TERMUX_PKG_SHA256=e2d1d92a4a593d9a87054ea54f76fcb6119f782c57945506a2ec4adff6ddc123
+TERMUX_PKG_AUTO_UPDATE=true
+TERMUX_PKG_DEPENDS="libandroid-shmem, libandroid-spawn, libiconv, libjpeg-turbo, zlib, littlecms, alsa-plugins"
+TERMUX_PKG_BUILD_DEPENDS="cups, fontconfig, libxrandr, libxt, xorgproto, alsa-lib"
 # openjdk-17-x is recommended because X11 separation is still very experimental.
 TERMUX_PKG_RECOMMENDS="ca-certificates-java, openjdk-17-x, resolv-conf"
 TERMUX_PKG_SUGGESTS="cups"
 TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_HAS_DEBUG=false
+# enable lto, but do not explicitly enable zgc or shenandoahgc because they
+# are automatically enabled for x86, but are not supported for arm.
+__jvm_features="link-time-opt"
+
+termux_pkg_auto_update() {
+	# based on `termux_github_api_get_tag.sh`
+	# fetch newest tags
+	local newest_tags newest_tag
+	newest_tags="$(curl -d "$(cat <<-EOF | tr '\n' ' '
+	{
+		"query": "query {
+			repository(owner: \"openjdk\", name: \"jdk17u\") {
+				refs(refPrefix: \"refs/tags/\", first: 20, orderBy: {
+					field: TAG_COMMIT_DATE, direction: DESC
+				})
+				{ edges { node { name } } }
+			}
+		}"
+	}
+	EOF
+	)" \
+		-H "Authorization: token ${GITHUB_TOKEN}" \
+		-H "Accept: application/vnd.github.v3+json" \
+		--silent \
+		--location \
+		--retry 10 \
+		--retry-delay 1 \
+		https://api.github.com/graphql \
+		| jq '.data.repository.refs.edges[].node.name')"
+	# filter only tags having "-ga" and extract only raw version.
+	read -r newest_tag < <(echo "$newest_tags" | grep -Po '17\.\d+\.\d+(?=-ga)' | sort -Vr)
+
+	[[ -z "${newest_tag}" ]] && termux_error_exit "Unable to get tag from ${TERMUX_PKG_SRCURL}"
+	termux_pkg_upgrade_version "${newest_tag}"
+}
 
 termux_step_pre_configure() {
 	unset JAVA_HOME
+
+	local patch="$TERMUX_PKG_BUILDER_DIR/tmpdir-path-length.diff"
+	local tmpdir_path="$TERMUX_PREFIX/tmp"
+	echo "Applying patch: $(basename "$patch")"
+	test -f "$patch" && sed \
+		-e "s%\@TERMUX_PREFIX\@%${TERMUX_PREFIX}%g" \
+		-e "s%\@TERMUX_TMPDIR_PATH_LENGTH\@%${#tmpdir_path}%g" \
+		"$patch" | patch --silent -p1
 }
 
 termux_step_configure() {
-	local jdk_ldflags="-L${TERMUX_PREFIX}/lib -Wl,-rpath=$TERMUX_PREFIX/lib/jvm/java-17-openjdk/lib -Wl,-rpath=${TERMUX_PREFIX}/lib -Wl,--enable-new-dtags"
+	local jdk_ldflags="-L${TERMUX_PREFIX}/lib \
+		-Wl,-rpath=$TERMUX_PREFIX/lib/jvm/java-17-openjdk/lib \
+		-Wl,-rpath=${TERMUX_PREFIX}/lib -Wl,--enable-new-dtags"
 	bash ./configure \
 		--disable-precompiled-headers \
 		--disable-warnings-as-errors \
 		--enable-option-checking=fatal \
-		--openjdk-target=$TERMUX_HOST_PLATFORM \
-		--with-cups-include="$TERMUX_PREFIX/include" \
+		--with-version-pre="" \
+		--with-version-opt="" \
+		--with-jvm-variants=server \
+		--with-jvm-features="${__jvm_features}" \
 		--with-debug-level=release \
+		--openjdk-target=$TERMUX_HOST_PLATFORM \
+		--with-toolchain-type=clang \
 		--with-extra-cflags="$CFLAGS $CPPFLAGS -DLE_STANDALONE -D__ANDROID__=1 -D__TERMUX__=1" \
 		--with-extra-cxxflags="$CXXFLAGS $CPPFLAGS -DLE_STANDALONE -D__ANDROID__=1 -D__TERMUX__=1" \
-		--with-extra-ldflags="${jdk_ldflags} -Wl,--as-needed -landroid-shmem -landroid-spawn" \
+		--with-extra-ldflags="${jdk_ldflags} -Wl,--as-needed -landroid-shmem -landroid-spawn -liconv" \
+		--with-cups-include="$TERMUX_PREFIX/include" \
 		--with-fontconfig-include="$TERMUX_PREFIX/include" \
 		--with-freetype-include="$TERMUX_PREFIX/include/freetype2" \
 		--with-freetype-lib="$TERMUX_PREFIX/lib" \
-		--with-giflib=system \
-		--with-jvm-variants=server \
-		--with-libjpeg=system \
-		--with-libpng=system \
-		--with-toolchain-type=clang \
+		--with-alsa="$TERMUX_PREFIX" \
+		--with-alsa-include="$TERMUX_PREFIX/include/alsa" \
+		--with-alsa-lib="$TERMUX_PREFIX/lib" \
 		--with-x="$TERMUX_PREFIX/include/X11" \
-		--with-zlib=system \
 		--x-includes="$TERMUX_PREFIX/include/X11" \
 		--x-libraries="$TERMUX_PREFIX/lib" \
+		--with-giflib=system \
+		--with-lcms=system \
+		--with-libjpeg=system \
+		--with-libpng=system \
+		--with-zlib=system \
+		--with-vendor-name="Termux" \
 		AR="$AR" \
 		NM="$NM" \
 		OBJCOPY="$OBJCOPY" \
 		OBJDUMP="$OBJDUMP" \
 		STRIP="$STRIP" \
 		CXXFILT="llvm-cxxfilt" \
-		BUILD_CC="/usr/bin/clang-17" \
-		BUILD_CXX="/usr/bin/clang++-17" \
-		BUILD_NM="/usr/bin/llvm-nm-17" \
-		BUILD_AR="/usr/bin/llvm-ar-17" \
-		BUILD_OBJCOPY="/usr/bin/llvm-objcopy-17" \
-		BUILD_STRIP="/usr/bin/llvm-strip-17"
+		BUILD_CC="$TERMUX_HOST_LLVM_BASE_DIR/bin/clang" \
+		BUILD_CXX="$TERMUX_HOST_LLVM_BASE_DIR/bin/clang++" \
+		BUILD_NM="$TERMUX_HOST_LLVM_BASE_DIR/bin/llvm-nm" \
+		BUILD_AR="$TERMUX_HOST_LLVM_BASE_DIR/bin/llvm-ar" \
+		BUILD_OBJCOPY="$TERMUX_HOST_LLVM_BASE_DIR/bin/llvm-objcopy" \
+		BUILD_STRIP="$TERMUX_HOST_LLVM_BASE_DIR/bin/llvm-strip" \
+		--with-jobs=$TERMUX_PKG_MAKE_PROCESSES
 }
 
 termux_step_make() {
 	cd build/linux-${TERMUX_ARCH/i686/x86}-server-release
-	make JOBS=1 images
+	make images
 }
 
 termux_step_make_install() {
+	rm -rf $TERMUX_PREFIX/lib/jvm/java-17-openjdk
 	mkdir -p $TERMUX_PREFIX/lib/jvm/java-17-openjdk
 	cp -r build/linux-${TERMUX_ARCH/i686/x86}-server-release/images/jdk/* \
 		$TERMUX_PREFIX/lib/jvm/java-17-openjdk/
@@ -80,21 +134,103 @@ termux_step_post_make_install() {
 	for manpage in *.1; do
 		gzip "$manpage"
 	done
-}
 
-termux_step_create_debscripts() {
+	# Make sure that our alternatives file is up to date.
 	binaries="$(find $TERMUX_PREFIX/lib/jvm/java-17-openjdk/bin -executable -type f | xargs -I{} basename "{}" | xargs echo)"
 	manpages="$(find $TERMUX_PREFIX/lib/jvm/java-17-openjdk/man/man1 -name "*.1.gz" | xargs -I{} basename "{}" | xargs echo)"
 
-	for hook in postinst prerm; do
-		sed -e "s|@TERMUX_PREFIX@|${TERMUX_PREFIX}|g" \
-			-e "s|@binaries@|${binaries}|g" \
-			-e "s|@manpages@|${manpages}|g" \
-			"$TERMUX_PKG_BUILDER_DIR/hooks/$TERMUX_PACKAGE_FORMAT/$hook.in" > $hook
-		chmod 700 $hook
+	local failure=false
+	for binary in $binaries; do
+		grep -q "lib/jvm/java-17-openjdk/bin/${binary}$" "$TERMUX_PKG_BUILDER_DIR"/openjdk-17.alternatives || {
+			echo "ERROR: Missing entry for binary: $binary in openjdk-17.alternatives"
+			failure=true
+		}
 	done
-
-	if [ "$TERMUX_PACKAGE_FORMAT" = "pacman" ]; then
-		echo "post_install" > postupg
+	for manpage in $manpages; do
+		grep -q "lib/jvm/java-17-openjdk/man/man1/${manpage}$" "$TERMUX_PKG_BUILDER_DIR"/openjdk-17.alternatives || {
+			echo "ERROR: Missing entry for manpage: $manpage in openjdk-17.alternatives"
+			failure=true
+		}
+	done
+	if [[ "$failure" = true ]]; then
+		termux_error_exit "openjdk-17.alternatives is not up to date, please update it."
 	fi
+}
+
+termux_step_create_debscripts() {
+	# For older versions of openjdk-17 and openjdk-21, we used to provide different alternatives for each binary and manpage.
+	# This script removes those alternatives if the user is upgrading from an older version.
+	#
+	# Using slaves for all binaries and manpages makes it much easier to switch between different versions of openjdk.
+	local old_alternatives=(
+		java-profile
+		jar
+		jarsigner
+		java
+		javac
+		javadoc
+		javap
+		jcmd
+		jconsole
+		jdb
+		jdeprscan
+		jdeps
+		jfr
+		jhsdb
+		jimage
+		jinfo
+		jlink
+		jmap
+		jmod
+		jpackage
+		jps
+		jrunscript
+		jshell
+		jstack
+		jstat
+		jstatd
+		jwebserver
+		keytool
+		rmiregistry
+		serialver
+		jar.1.gz
+		jarsigner.1.gz
+		java.1.gz
+		javac.1.gz
+		javadoc.1.gz
+		javap.1.gz
+		jcmd.1.gz
+		jconsole.1.gz
+		jdb.1.gz
+		jdeprscan.1.gz
+		jdeps.1.gz
+		jfr.1.gz
+		jhsdb.1.gz
+		jinfo.1.gz
+		jlink.1.gz
+		jmap.1.gz
+		jmod.1.gz
+		jpackage.1.gz
+		jps.1.gz
+		jrunscript.1.gz
+		jshell.1.gz
+		jstack.1.gz
+		jstat.1.gz
+		jstatd.1.gz
+		jwebserver.1.gz
+		keytool.1.gz
+		rmiregistry.1.gz
+		serialver.1.gz
+	)
+	# For older versions
+	echo 'if [ "$#" = "3" ] && dpkg --compare-versions "$2" le "17.0.15-1"; then' > ./preinst
+	echo '  echo "Removing older alternatives for openjdk-21 and openjdk-17"' >> ./preinst
+	echo '  echo "This may take a while if mandoc package is installed, please wait..."' >> ./preinst
+	echo '  echo "Newer versions of openjdk-21 and openjdk-17 change how alternatives are handled."' >> ./preinst
+	echo '  echo "Instead of having different alternatives for each manpage and binary, now you can switch java versions much easily using \"update-alternatives --config java\""' >> ./preinst
+	echo '  echo "This should switch all java binaries, manpages, and bash profile for java in a single command instead of switching everything manually"' >> ./preinst
+	for alternative in "${old_alternatives[@]}"; do
+		echo "  update-alternatives --remove-all ${alternative} || :" >> ./preinst
+	done
+	echo 'fi' >> ./preinst
 }

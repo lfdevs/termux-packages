@@ -19,7 +19,7 @@ termux_setup_swift() {
 			termux_download \
 				https://download.swift.org/swift-$TERMUX_SWIFT_VERSION-release/ubuntu2404/swift-$TERMUX_SWIFT_VERSION-$SWIFT_RELEASE/$SWIFT_BIN.tar.gz \
 				$SWIFT_TAR \
-				33e923609f6d89ee455af0a017ae4941ce16878c4940882cbf6a1656de294e8b
+				f19a228960e1d8174db796dcea3defe6963b588af45fa3ddf0412adbe4b7bb84
 
 			(cd $TERMUX_PKG_TMPDIR ; tar xf $SWIFT_TAR ; mv $SWIFT_BIN $SWIFT_FOLDER; rm $SWIFT_TAR)
 		fi

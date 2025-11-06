@@ -1,6 +1,6 @@
---- a/ipc/glue/SharedMemory_posix.cpp
-+++ b/ipc/glue/SharedMemory_posix.cpp
-@@ -40,6 +40,65 @@
+--- a/ipc/glue/SharedMemoryPlatform_posix.cpp
++++ b/ipc/glue/SharedMemoryPlatform_posix.cpp
+@@ -39,6 +39,65 @@
  #include "prenv.h"
  #include "nsXULAppAPI.h"  // for XRE_IsParentProcess
  
@@ -63,9 +63,9 @@
 +    return fd;
 +}
 +
- namespace mozilla::ipc {
+ namespace mozilla::ipc::shared_memory {
  
- void SharedMemory::ResetImpl() {
+ // memfd_create is a nonstandard interface for creating anonymous
 @@ -101,7 +160,7 @@
  // FreeBSD in version 13.
  

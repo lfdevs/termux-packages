@@ -3,7 +3,7 @@ TERMUX_PKG_DESCRIPTION="A persistent huge storage service, compatible with the v
 TERMUX_PKG_LICENSE="BSD 3-Clause"
 TERMUX_PKG_MAINTAINER="@termux"
 TERMUX_PKG_VERSION=3.4.1
-TERMUX_PKG_REVISION=10
+TERMUX_PKG_REVISION=14
 TERMUX_PKG_SRCURL=git+https://github.com/OpenAtomFoundation/pika
 TERMUX_PKG_DEPENDS="abseil-cpp, google-glog, libc++, libprotobuf, librocksdb"
 TERMUX_PKG_BUILD_IN_SRC=true
@@ -14,7 +14,7 @@ TERMUX_PKG_BUILD_IN_SRC=true
 #   if (!slash::string2l(argv_[2].data(), argv_[2].size(), &cursor_)) {
 #                                                          ^~~~~~~~
 # ```
-TERMUX_PKG_BLACKLISTED_ARCHES="arm, i686"
+TERMUX_PKG_EXCLUDED_ARCHES="arm, i686"
 
 termux_step_post_get_source() {
 	rm -fr third/rocksdb

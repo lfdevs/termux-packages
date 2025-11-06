@@ -2,11 +2,11 @@ TERMUX_PKG_HOMEPAGE=https://www.monetdb.org/
 TERMUX_PKG_DESCRIPTION="A high-performance database kernel for query-intensive applications"
 TERMUX_PKG_LICENSE="MPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="11.51.7"
+TERMUX_PKG_VERSION="11.53.13"
 TERMUX_PKG_SRCURL=https://www.monetdb.org/downloads/sources/archive/MonetDB-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=98fd6512858911b0e6e3a0f62432f4ac7acb34ca8b6adc882db6e3315fc297c6
+TERMUX_PKG_SHA256=ed5093234689d7f0ed5a439bc904388f5b2bd12ad08308cedcbd5faca95e0325
 TERMUX_PKG_AUTO_UPDATE=true
-TERMUX_PKG_DEPENDS="libandroid-sysv-semaphore, libbz2, libcurl, libiconv, liblz4, liblzma, libxml2, netcdf-c, pcre, readline, zlib"
+TERMUX_PKG_DEPENDS="libandroid-sysv-semaphore, libbz2, libcurl, libiconv, liblz4, liblzma, libxml2, netcdf-c, pcre2, readline, zlib"
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -DODBC=OFF
 -DTESTING=OFF
@@ -19,7 +19,7 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 # #error "we need _Atomic(unsigned long long) to be lock free"
 #  ^
 # ```
-TERMUX_PKG_BLACKLISTED_ARCHES="i686"
+TERMUX_PKG_EXCLUDED_ARCHES="i686"
 
 termux_step_post_get_source() {
 	find . -name '*.c' | xargs -n 1 sed -i \

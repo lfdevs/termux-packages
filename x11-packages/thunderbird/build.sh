@@ -2,65 +2,62 @@ TERMUX_PKG_HOMEPAGE=https://www.thunderbird.net
 TERMUX_PKG_DESCRIPTION="Unofficial Thunderbird email client"
 TERMUX_PKG_LICENSE="MPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="128.5.2"
-TERMUX_PKG_SRCURL="https://archive.mozilla.org/pub/thunderbird/releases/${TERMUX_PKG_VERSION}esr/source/thunderbird-${TERMUX_PKG_VERSION}esr.source.tar.xz"
-TERMUX_PKG_SHA256=ef932fe30fcc3f90f465feffcf641147d678ec3ecda220f317046e715a905547
+TERMUX_PKG_VERSION="144.0.1"
+TERMUX_PKG_REVISION=1
+TERMUX_PKG_SRCURL="https://archive.mozilla.org/pub/thunderbird/releases/${TERMUX_PKG_VERSION}/source/thunderbird-${TERMUX_PKG_VERSION}.source.tar.xz"
+TERMUX_PKG_SHA256=62dd606308ee0c3298e052c05a8fce321df3a1012628511c7aacdf7ef6b7e965
 TERMUX_PKG_DEPENDS="ffmpeg, fontconfig, freetype, gdk-pixbuf, glib, gtk3, libandroid-shmem, libandroid-spawn, libc++, libcairo, libevent, libffi, libice, libicu, libjpeg-turbo, libnspr, libnss, libotr, libpixman, libsm, libvpx, libwebp, libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxrandr, libxtst, pango, pulseaudio, zlib"
-TERMUX_PKG_BUILD_DEPENDS="binutils-cross, libcpufeatures, libice, libsm"
+TERMUX_PKG_BUILD_DEPENDS="libcpufeatures, libice, libsm"
 TERMUX_PKG_BUILD_IN_SRC=true
-# Mozilla does not provide a simple way to find the latest ESR release
-TERMUX_PKG_UPDATE_VERSION_REGEXP='\d+\.\d+\.\d+(?=esr/)'
 TERMUX_PKG_AUTO_UPDATE=true
 
 termux_pkg_auto_update() {
-	# Adapted from the auto_update function in x11/firefox and packages/ncdu.
-	# Unfortunately there is no 'latest-esr/' directory for Thunderbird.
 	# https://archive.mozilla.org/pub/thunderbird/releases/latest/README.txt
-	local api_url latest_esr
-	api_url="https://archive.mozilla.org/pub/thunderbird/releases/"
-	latest_esr="$(curl -s "$api_url" \
-		| grep -oP "$TERMUX_PKG_UPDATE_VERSION_REGEXP" \
-		| sort -V \
-		| tail -n1)"
+	local e=0
+	local api_url="https://download.mozilla.org/?product=thunderbird-latest&os=linux64&lang=en-US"
+	local api_url_r=$(curl -s "${api_url}")
+	local latest_version=$(echo "${api_url_r}" | sed -nE "s/.*thunderbird-(.*).tar.xz.*/\1/p")
+	[[ -z "${api_url_r}" ]] && e=1
+	[[ -z "${latest_version}" ]] && e=1
 
-	if [[ "${latest_esr}" == "${TERMUX_PKG_VERSION}" ]]; then
-		echo "INFO: No update needed. Already at version '${latest_esr}'."
+	local uptime_now=$(cat /proc/uptime)
+	local uptime_s="${uptime_now//.*}"
+	local uptime_h_limit=2
+	local uptime_s_limit=$((uptime_h_limit*60*60))
+	[[ -z "${uptime_s}" ]] && [[ "$(uname -o)" != "Android" ]] && e=1
+	[[ "${uptime_s}" == 0 ]] && [[ "$(uname -o)" != "Android" ]] && e=1
+	[[ "${uptime_s}" -gt "${uptime_s_limit}" ]] && e=1
+
+	if [[ "${e}" != 0 ]]; then
+		cat <<- EOL >&2
+		WARN: Auto update failure!
+		api_url_r=${api_url_r}
+		latest_version=${latest_version}
+		uptime_now=${uptime_now}
+		uptime_s=${uptime_s}
+		uptime_s_limit=${uptime_s_limit}
+		EOL
 		return
 	fi
 
-	# We want to avoid re-filtering the version.
-	# It's already cleaned up, so unset the regexp.
-	# See: https://github.com/termux/termux-packages/issues/20836
-	# See also: packages/taplo/build.sh
-	unset TERMUX_PKG_UPDATE_VERSION_REGEXP
-	termux_pkg_upgrade_version "${latest_esr}"
+	termux_pkg_upgrade_version "${latest_version}"
 }
-
 
 termux_step_post_get_source() {
 	local f="media/ffvpx/config_unix_aarch64.h"
 	echo "Applying sed substitution to ${f}"
 	sed -E '/^#define (CONFIG_LINUX_PERF|HAVE_SYSCTL) /s/1$/0/' -i ${f}
+
+	# Update Cargo.toml to use the patched cc
+	sed -i 's|^\(\[patch\.crates-io\]\)$|\1\ncc = { path = "third_party/rust/cc" }|g' \
+		Cargo.toml
+	(
+		termux_setup_rust
+		cargo update -p cc
+	)
 }
 
 termux_step_pre_configure() {
-	# XXX: flang toolchain provides libclang.so
-	termux_setup_flang
-	local __fc_dir __flang_toolchain_folder
-	__fc_dir="$(dirname "$(command -v "$FC")")"
-	__flang_toolchain_folder="$(realpath "$__fc_dir"/..)"
-	if [ ! -d "$TERMUX_PKG_TMPDIR/thunderbird-toolchain" ]; then
-		rm -rf "$TERMUX_PKG_TMPDIR"/thunderbird-toolchain-tmp
-		mv "$__flang_toolchain_folder" "$TERMUX_PKG_TMPDIR"/thunderbird-toolchain-tmp
-
-		cp "$(command -v "$CC")" "$TERMUX_PKG_TMPDIR"/thunderbird-toolchain-tmp/bin/
-		cp "$(command -v "$CXX")" "$TERMUX_PKG_TMPDIR"/thunderbird-toolchain-tmp/bin/
-		cp "$(command -v "$CPP")" "$TERMUX_PKG_TMPDIR"/thunderbird-toolchain-tmp/bin/
-
-		mv "$TERMUX_PKG_TMPDIR"/thunderbird-toolchain-tmp "$TERMUX_PKG_TMPDIR"/thunderbird-toolchain
-	fi
-	export PATH="$TERMUX_PKG_TMPDIR/thunderbird-toolchain/bin:$PATH"
-
 	termux_setup_nodejs
 	termux_setup_rust
 
@@ -76,7 +73,7 @@ termux_step_pre_configure() {
 	HOST_CXX="$(command -v clang++)"
 	export HOST_CC HOST_CXX
 
-	export BINDGEN_CFLAGS="--target=$CCTERMUX_HOST_PLATFORM --sysroot=$TERMUX_PKG_TMPDIR/thunderbird-toolchain/sysroot"
+	export BINDGEN_CFLAGS="--target=$CCTERMUX_HOST_PLATFORM --sysroot=$TERMUX_STANDALONE_TOOLCHAIN/sysroot"
 	local env_name=BINDGEN_EXTRA_CLANG_ARGS_${CARGO_TARGET_NAME@U}
 	env_name=${env_name//-/_}
 	export "$env_name"="$BINDGEN_CFLAGS"
@@ -92,6 +89,11 @@ termux_step_pre_configure() {
 }
 
 termux_step_configure() {
+	if [ "$TERMUX_CONTINUE_BUILD" == "true" ]; then
+		termux_step_pre_configure
+		cd $TERMUX_PKG_SRCDIR
+	fi
+
 	sed \
 		-e "s|@TERMUX_HOST_PLATFORM@|${TERMUX_HOST_PLATFORM}|" \
 		-e "s|@TERMUX_PREFIX@|${TERMUX_PREFIX}|" \
@@ -106,21 +108,10 @@ END
 	fi
 
 	./mach configure
-	./mach tb-rust vendor
 }
 
 termux_step_make() {
-	# XXX: Try max 10 times
-	for t in $(seq 1 10); do
-		if ./mach build --keep-going; then
-			break
-		else
-			if [ "$t" = "10" ]; then
-				termux_error_exit "Giving up after 10 attempts"
-			fi
-		fi
-	done
-
+	./mach build -j "$TERMUX_PKG_MAKE_PROCESSES"
 	./mach buildsymbols
 }
 

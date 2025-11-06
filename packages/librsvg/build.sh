@@ -2,20 +2,23 @@ TERMUX_PKG_HOMEPAGE=https://wiki.gnome.org/action/show/Projects/LibRsvg
 TERMUX_PKG_DESCRIPTION="Library to render SVG files using cairo"
 TERMUX_PKG_LICENSE="LGPL-2.1"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="2.59.2"
-TERMUX_PKG_SRCURL=https://ftp.gnome.org/pub/GNOME/sources/librsvg/${TERMUX_PKG_VERSION%.*}/librsvg-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=ecd293fb0cc338c170171bbc7bcfbea6725d041c95f31385dc935409933e4597
+TERMUX_PKG_VERSION="2.61.3"
+TERMUX_PKG_SRCURL=https://download.gnome.org/sources/librsvg/${TERMUX_PKG_VERSION%.*}/librsvg-${TERMUX_PKG_VERSION}.tar.xz
+TERMUX_PKG_SHA256=a56d2c80d744ad2f2718f85df466fe71d24ff1f9bc3e5ef588bde4d7e87815f2
 TERMUX_PKG_AUTO_UPDATE=true
-TERMUX_PKG_DEPENDS="fontconfig, freetype, gdk-pixbuf, glib, harfbuzz, libcairo, libpng, libxml2, pango"
-TERMUX_PKG_BUILD_DEPENDS="g-ir-scanner"
+TERMUX_PKG_DEPENDS="fontconfig, freetype, gdk-pixbuf, glib, harfbuzz, libcairo, libdav1d, libpng, libxml2, pango"
+TERMUX_PKG_BUILD_DEPENDS="g-ir-scanner, valac"
 TERMUX_PKG_BREAKS="librsvg-dev"
 TERMUX_PKG_REPLACES="librsvg-dev"
 TERMUX_PKG_VERSIONED_GIR=false
 TERMUX_PKG_DISABLE_GIR=false
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
+-Davif=enabled
 -Ddocs=disabled
 -Dintrospection=enabled
 -Dtests=false
+-Dvala=enabled
+-Dpixbuf-loader=enabled
 "
 
 termux_step_pre_configure() {
@@ -23,7 +26,7 @@ termux_step_pre_configure() {
 	termux_setup_meson
 	termux_setup_rust
 	termux_setup_cargo_c
-	
+
 	# termux_setup_rust unsets CFLAGS so we called termux_setup_meson before
 	# we need to reset termux_setup_meson to avoid `line 70: CFLAGS: unbound variable` error
 	termux_setup_meson() { :; }

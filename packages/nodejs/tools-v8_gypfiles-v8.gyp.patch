@@ -1,7 +1,15 @@
-When building for x64 or arm64 target, the host build of nodejs is done for x64. But when building for ia32 (x86) or arm (32-bit arm), the host build of nodejs is done for ia32. The cross compilation support of nodejs is really janky, this configuration should not need to have been patched by us, but unfortunately we have to
---- ./tools/v8_gypfiles/v8.gyp.orig	2024-12-10 16:14:45.000000000 +0530
-+++ ./tools/v8_gypfiles/v8.gyp	2024-12-17 10:14:00.499085823 +0530
-@@ -1414,6 +1414,7 @@
+--- ./tools/v8_gypfiles/v8.gyp.orig	2025-05-08 13:56:23.000000000 +0530
++++ ./tools/v8_gypfiles/v8.gyp	2025-05-09 19:46:24.096599118 +0530
+@@ -1309,7 +1309,7 @@
+         # Platforms that don't have Compare-And-Swap (CAS) support need to link atomic library
+         # to implement atomic memory access.
+         # Clang needs it for some atomic operations (https://clang.llvm.org/docs/Toolchain.html#atomics-library).
+-        ['(OS=="linux" and clang==1) or (v8_current_cpu in ["mips64", "mips64el", "arm", "riscv64", "loong64"])', {
++        ['((OS=="linux" or OS=="android") and clang==1) or (v8_current_cpu in ["mips64", "mips64el", "arm", "riscv64", "loong64"])', {
+           'link_settings': {
+             'libraries': ['-latomic', ],
+           },
+@@ -1448,6 +1448,7 @@
              '<(V8_ROOT)/src/base/platform/platform-posix.h',
              '<(V8_ROOT)/src/base/platform/platform-posix-time.cc',
              '<(V8_ROOT)/src/base/platform/platform-posix-time.h',
@@ -9,18 +17,3 @@ When building for x64 or arm64 target, the host build of nodejs is done for x64.
            ],
            'link_settings': {
              'target_conditions': [
-@@ -1936,12 +1937,12 @@
-             ],
-           }, { # 'OS!="win"'
-             'conditions': [
--              ['_toolset == "host" and host_arch == "x64" or _toolset == "target" and target_arch=="x64"', {
-+              ['_toolset == "host" and host_arch == "x64" and (target_arch == "x64" or target_arch == "arm64") or (_toolset == "target" and target_arch == "x64")', {
-                 'sources': [
-                   '<(V8_ROOT)/src/heap/base/asm/x64/push_registers_asm.cc',
-                 ],
-               }],
--              ['_toolset == "host" and host_arch == "ia32" or _toolset == "target" and target_arch=="ia32"', {
-+              ['_toolset == "host" and host_arch == "x64" and (target_arch == "arm" or target_arch == "ia32") or (_toolset == "target" and target_arch == "ia32")', {
-                 'sources': [
-                   '<(V8_ROOT)/src/heap/base/asm/ia32/push_registers_asm.cc',
-                 ],
