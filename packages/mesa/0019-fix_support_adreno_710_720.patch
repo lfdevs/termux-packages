@@ -1,0 +1,23 @@
+Try to fix unofficial support for Adreno 710 and Adreno 720 to prevent build errors below:
+TypeError: A6xxGPUInfo.__init__() missing 2 required positional arguments: 'tile_max_w' and 'tile_max_h'
+
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -1178,6 +1178,8 @@ add_gpus([
+         num_ccu = 4,
+         tile_align_w = 64,
+         tile_align_h = 32,
++        tile_max_w = 1024,
++        tile_max_h = 1024,
+         num_vsc_pipes = 32,
+         cs_shared_mem_size = 32 * 1024,
+         wave_granularity = 2,
+@@ -1196,6 +1198,8 @@ add_gpus([
+         num_ccu = 4,
+         tile_align_w = 64,
+         tile_align_h = 32,
++        tile_max_w = 1024,
++        tile_max_h = 1024,
+         num_vsc_pipes = 32,
+         cs_shared_mem_size = 32 * 1024,
+         wave_granularity = 2,
