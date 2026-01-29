@@ -3,7 +3,6 @@ name: Packages
 on:
   push:
     branches:
-    - master
     - dev
     - 'dev/**'
     paths:
