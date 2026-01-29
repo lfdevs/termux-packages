@@ -3,14 +3,8 @@ name: Packages
 on:
   push:
     branches:
-    - master
     - dev
     - 'dev/**'
-    paths:
-    - 'packages/**'
-    - 'root-packages/**'
-    - 'x11-packages/**'
-  pull_request:
     paths:
     - 'packages/**'
     - 'root-packages/**'
