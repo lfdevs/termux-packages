@@ -1,0 +1,31 @@
+From a1753391a9bad3f360e79d2848047894319cca6c Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sat, 8 Aug 2026 17:25:42 +0800
+Subject: [PATCH 27/27] backends/anland: Prefer consumer clipboard on reconnect
+
+The Android consumer sends an initial clipboard update after a transport reconnect. Replaying the last compositor clipboard before that update can overwrite a newer system clipboard while the app is returning from the background, causing stale text to be pasted in the session.
+
+Keep cached content only for loop detection. Let the consumer's initial clipboard transfer establish the current value; subsequent owner changes continue to be forwarded normally.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0019-backends-anland-Prefer-consumer-clipboard-on-reconnect.patch
+
+diff --git a/src/backends/anland/meta-anland-clipboard.c b/src/backends/anland/meta-anland-clipboard.c
+index a3bd5dd948..7bec4a13c6 100644
+--- a/src/backends/anland/meta-anland-clipboard.c
++++ b/src/backends/anland/meta-anland-clipboard.c
+@@ -282,8 +282,12 @@ meta_anland_clipboard_set_transport (MetaAnlandClipboard *clipboard,
+   cancel_selection_transfer (clipboard);
+   clipboard->transport = transport;
+ 
+-  if (transport && clipboard->cached_contents)
+-    send_contents (clipboard, clipboard->cached_contents);
++  /*
++   * The consumer reads the Android clipboard as part of its reconnect path.
++   * Do not race that initial sync by replaying cached compositor contents here:
++   * when the app was in the background, doing so can overwrite a newer Android
++   * clipboard before it has a chance to send it to Mutter.
++   */
+ }
+ 
+ gboolean

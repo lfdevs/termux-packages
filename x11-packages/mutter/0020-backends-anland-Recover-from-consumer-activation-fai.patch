@@ -1,0 +1,52 @@
+From 853051888bc995563d7a7bcaa973d8b0987c1815 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Tue, 4 Aug 2026 15:16:32 +0800
+Subject: [PATCH 20/27] backends/anland: Recover from consumer activation
+ failures
+
+When the picture-in-picture replacement buffers failed EGL import, consumer
+activation returned without putting the transport back into fallback. The
+reconnect timer then retried the same descriptor set indefinitely, even after
+the consumer re-deposited fresh resources with the daemon.
+
+Release any partially imported framebuffers and duplicated source descriptors,
+then enter transport fallback on fatal activation errors. This closes the stale
+data channel and lets the next reconnect collect the consumer's replacement
+resources.
+
+Include the buffer index and layout in dma-buf import errors so persistent
+driver-specific failures can be diagnosed from the compositor log.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0011-backends-anland-Recover-from-consumer-activation-failures.patch
+
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index ebe09f55f1..ec15a2fe84 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -780,7 +780,16 @@ activate_consumer (MetaBackendAnland *backend)
+         renderer_native, buffer_info.width, buffer_info.height,
+         DRM_FORMAT_ABGR8888, 1, &fd, &stride, &offset, &modifier, &error);
+       if (!framebuffers[i])
+-        goto failed;
++        {
++          g_prefix_error (&error,
++                          "Failed to import Anland buffer %d "
++                          "(%ux%u, stride %u, offset %u, "
++                          "modifier %" G_GUINT64_FORMAT "): ",
++                          i, buffer_info.width, buffer_info.height,
++                          buffer_info.stride, buffer_info.offset,
++                          buffer_info.modifier);
++          goto failed;
++        }
+     }
+ 
+   buffer_ready_fd = meta_anland_transport_get_buffer_ready_fd (backend->transport);
+@@ -832,6 +841,7 @@ failed:
+     close (buffer_ready_source_fd);
+   if (input_source_fd >= 0)
+     close (input_source_fd);
++  meta_anland_transport_enter_fallback (backend->transport);
+   return FALSE;
+ }
+ 

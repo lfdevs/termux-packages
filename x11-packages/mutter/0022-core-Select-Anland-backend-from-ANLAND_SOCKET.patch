@@ -1,0 +1,42 @@
+From 9f18b91cbfea4db3a53471ca4afe40d78f38732b Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Wed, 5 Aug 2026 09:48:57 +0800
+Subject: [PATCH 22/27] core: Select Anland backend from ANLAND_SOCKET
+
+ANLAND_SOCKET already selects the display daemon socket, but starting the
+backend still requires the separate --anland option. Display managers launch
+GNOME Shell without backend-specific command-line arguments, preventing an
+Anland session from using their normal startup path.
+
+Treat a non-empty ANLAND_SOCKET as an opt-in to the Anland backend after
+command-line parsing and before configuration validation. Preserve the
+existing explicit options and their mutual-exclusion checks, while leaving an
+empty environment value inactive.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0014-core-Select-Anland-backend-from-ANLAND_SOCKET.patch
+
+diff --git a/src/core/meta-context-main.c b/src/core/meta-context-main.c
+index cbe9d17e3b..2628ba9b43 100644
+--- a/src/core/meta-context-main.c
++++ b/src/core/meta-context-main.c
+@@ -329,10 +329,19 @@ meta_context_main_configure (MetaContext   *context,
+   MetaContextMain *context_main = META_CONTEXT_MAIN (context);
+   MetaContextClass *context_class =
+     META_CONTEXT_CLASS (meta_context_main_parent_class);
++#ifdef HAVE_ANLAND
++  const char *anland_socket;
++#endif
+ 
+   if (!context_class->configure (context, argc, argv, error))
+     return FALSE;
+ 
++#ifdef HAVE_ANLAND
++  anland_socket = g_getenv ("ANLAND_SOCKET");
++  if (anland_socket && *anland_socket)
++    context_main->options.anland = TRUE;
++#endif
++
+   if (!check_configuration (context_main, error))
+     return FALSE;
+ 

@@ -1,0 +1,76 @@
+<?xml version="1.0"?>
+<dump>
+  <class name="ICalObject" get-type="i_cal_object_get_type" parents="GObject" abstract="1">
+    <property name="native" type="gpointer" flags="235"/>
+    <property name="native-destroy-func" type="gpointer" flags="227"/>
+    <property name="is-global-memory" type="gboolean" flags="235" default-value="FALSE"/>
+    <property name="always-destroy" type="gboolean" flags="227" default-value="FALSE"/>
+    <property name="owner" type="GObject" flags="227"/>
+  </class>
+  <class name="ICalArray" get-type="i_cal_array_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalAttach" get-type="i_cal_attach_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalCompIter" get-type="i_cal_comp_iter_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalParameter" get-type="i_cal_parameter_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalComponent" get-type="i_cal_component_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalTime" get-type="i_cal_time_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalPeriod" get-type="i_cal_period_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalDatetimeperiod" get-type="i_cal_datetimeperiod_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalDuration" get-type="i_cal_duration_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalEnumArray" get-type="i_cal_enum_array_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalGeo" get-type="i_cal_geo_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalParamIter" get-type="i_cal_param_iter_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalParser" get-type="i_cal_parser_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalProperty" get-type="i_cal_property_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalPropIter" get-type="i_cal_prop_iter_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalRecurIterator" get-type="i_cal_recur_iterator_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalRecurrence" get-type="i_cal_recurrence_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalReqstat" get-type="i_cal_reqstat_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalStrArray" get-type="i_cal_str_array_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalTimeSpan" get-type="i_cal_time_span_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalTimezone" get-type="i_cal_timezone_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalTrigger" get-type="i_cal_trigger_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalValue" get-type="i_cal_value_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardParameter" get-type="i_cal_vcard_parameter_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardComponent" get-type="i_cal_vcard_component_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardEnumArray" get-type="i_cal_vcard_enum_array_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardGeo" get-type="i_cal_vcard_geo_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardProperty" get-type="i_cal_vcard_property_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardStrArray" get-type="i_cal_vcard_str_array_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardStructured" get-type="i_cal_vcard_structured_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardTime" get-type="i_cal_vcard_time_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardTz" get-type="i_cal_vcard_tz_get_type" parents="ICalObject,GObject">
+  </class>
+  <class name="ICalVcardValue" get-type="i_cal_vcard_value_get_type" parents="ICalObject,GObject">
+  </class>
+</dump>

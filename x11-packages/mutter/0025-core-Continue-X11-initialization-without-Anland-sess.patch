@@ -1,0 +1,59 @@
+From 4a18f6e07e40d43b097f1a70774177e91b674608 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Wed, 5 Aug 2026 15:09:14 +0800
+Subject: [PATCH 25/27] core: Continue X11 initialization without Anland
+ session services
+
+GNOME Shell can reject Mutter's init-xserver task when it cannot start optional X11 session services through systemd. This is expected in PRoot containers without a system bus, even though Xwayland has already announced readiness. Continue initializing the X11 display for the Anland backend when that callback returns FALSE without an error, while preserving failures with explicit errors and all other backends.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0017-core-Continue-X11-initialization-without-Anland-session-services.patch
+
+diff --git a/src/core/display.c b/src/core/display.c
+index 3e25f8019b..649c770e63 100644
+--- a/src/core/display.c
++++ b/src/core/display.c
+@@ -35,6 +35,9 @@
+ #include <unistd.h>
+ 
+ #include "backends/meta-backend-private.h"
++#ifdef HAVE_ANLAND
++#include "backends/anland/meta-backend-anland.h"
++#endif
+ #include "backends/meta-cursor-sprite-xcursor.h"
+ #include "backends/meta-cursor-tracker-private.h"
+ #include "backends/meta-input-capture.h"
+@@ -831,15 +834,29 @@ meta_display_init_x11_finish (MetaDisplay   *display,
+                               GError       **error)
+ {
+   MetaX11Display *x11_display;
++  gboolean x11_services_started;
+ 
+   g_assert (g_task_get_source_tag (G_TASK (result)) == meta_display_init_x11);
+ 
+-  if (!g_task_propagate_boolean (G_TASK (result), error))
++  x11_services_started = g_task_propagate_boolean (G_TASK (result), error);
++  if (!x11_services_started)
+     {
+-      if (*error == NULL)
+-        g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Unknown error");
++#ifdef HAVE_ANLAND
++      MetaContext *context = meta_display_get_context (display);
++      MetaBackend *backend = meta_context_get_backend (context);
+ 
+-      return FALSE;
++      if (*error == NULL && META_IS_BACKEND_ANLAND (backend))
++        {
++          g_message ("Continuing without X11 session services on Anland");
++        }
++      else
++#endif
++        {
++          if (*error == NULL)
++            g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED, "Unknown error");
++
++          return FALSE;
++        }
+     }
+ 
+   if (display->x11_display)

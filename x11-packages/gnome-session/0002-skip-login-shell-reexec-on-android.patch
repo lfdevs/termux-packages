@@ -1,0 +1,21 @@
+--- a/gnome-session/leader-main.c
++++ b/gnome-session/leader-main.c
+@@ -34,6 +34,10 @@
+ static char *
+ shell_to_login_shell (const char *shell)
+ {
++#ifdef __ANDROID__
++        /* Bionic does not provide getusershell(3). */
++        return NULL;
++#else
+         gboolean in_etc_shells = FALSE;
+         const char *candidate;
+         g_autofree char *basename = NULL;
+@@ -64,6 +68,7 @@ shell_to_login_shell (const char *shell)
+         /* It's a login shell! Let's do the UNIX magic of prepending '-' to
+          * argv [0], and that will tell the shell to run as a login shell */
+         return g_strdup_printf ("-%s", basename);
++#endif
+ }
+ 
+ static void

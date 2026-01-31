@@ -1,0 +1,243 @@
+--- a/data/meson.build
++++ b/data/meson.build
+@@ -62,6 +62,7 @@ endif
+
+ # Next, let's install the necessary systemd scaffolding
+
++if get_option('systemd')
+ install_data(
+     'gnome.session.conf',
+     install_dir: systemd_userunitdir / 'gnome-session@gnome.target.d',
+@@ -125,6 +126,7 @@ install_data(
+   rename: 'override.conf',
+   install_dir : join_paths(systemd_userunitdir, 'app-flatpak-.scope.d')
+ )
++endif
+
+ # Install some other misc. configuration files
+
+--- a/gnome-session/gsm-app.c
++++ b/gnome-session/gsm-app.c
+@@ -27,8 +27,10 @@
+ #include <gio/gio.h>
+ #include <gio/gdesktopappinfo.h>
+
++#ifdef HAVE_SYSTEMD
+ #define GNOME_DESKTOP_USE_UNSTABLE_API
+ #include <libgnome-desktop/gnome-systemd.h>
++#endif
+
+ #include "gsm-app.h"
+ #include "gsm-util.h"
+@@ -198,9 +200,10 @@ app_launched (GAppLaunchContext *ctx,
+               GVariant          *platform_data,
+               gpointer           data)
+ {
++#ifdef HAVE_SYSTEMD
+         GsmApp *app = data;
+-
+         gint pid = 0;
++
+         g_variant_lookup (platform_data, "pid", "i", &pid);
+
+         /* If pid == 0 the application was launched through D-Bus
+@@ -214,6 +217,7 @@ app_launched (GAppLaunchContext *ctx,
+                                    NULL,
+                                    NULL,
+                                    NULL, NULL, NULL);
++#endif
+ }
+
+ gboolean
+--- a/gnome-session/gsm-manager.c
++++ b/gnome-session/gsm-manager.c
+@@ -40,9 +40,13 @@
+ #include "gsm-manager.h"
+ #include "org.gnome.SessionManager.h"
+
++#ifdef HAVE_SYSTEMD
+ #include <systemd/sd-journal.h>
+-
+ #include <systemd/sd-daemon.h>
++#else
++#define sd_notify(...)
++#define sd_journal_send(...)
++#endif
+
+ #include "gsm-app.h"
+ #include "gsm-client.h"
+@@ -838,6 +842,12 @@ gsm_manager_start (GsmManager *manager)
+
+         debug_app_summary (manager);
+         start_phase (manager);
++
++#ifndef HAVE_SYSTEMD
++        /* Systemd normally advances this transition through Initialized(). */
++        manager->phase++;
++        start_phase (manager);
++#endif
+ }
+
+ void
+@@ -1481,6 +1491,11 @@ gsm_manager_initialized (GsmExportedManager    *skeleton,
+                          GDBusMethodInvocation *invocation,
+                          GsmManager            *manager)
+ {
++#ifndef HAVE_SYSTEMD
++        /* The standalone manager has already entered the application phase. */
++        gsm_exported_manager_complete_initialized (skeleton, invocation);
++        return TRUE;
++#else
+         /* Signaled by helper when gnome-session-initialized.target is reached. */
+         if (manager->systemd_initialized) {
+                 g_dbus_method_invocation_return_error (invocation,
+@@ -1503,6 +1518,7 @@ gsm_manager_initialized (GsmExportedManager    *skeleton,
+         }
+
+         return TRUE;
++#endif
+ }
+
+ static gboolean
+--- a/gnome-session/gsm-system.c
++++ b/gnome-session/gsm-system.c
+@@ -23,7 +23,9 @@
+
+ #include "gsm-system.h"
+
++#ifdef HAVE_SYSTEMD
+ #include "gsm-systemd.h"
++#endif
+
+
+ enum {
+@@ -246,10 +248,12 @@ gsm_get_system (void)
+         static GsmSystem *system = NULL;
+
+         if (system == NULL) {
++#ifdef HAVE_SYSTEMD
+                 system = GSM_SYSTEM (gsm_systemd_new ());
+                 if (system != NULL) {
+                         g_debug ("Using systemd for session tracking");
+                 }
++#endif
+         }
+
+         if (system == NULL) {
+--- a/gnome-session/gsm-systemd.c
++++ b/gnome-session/gsm-systemd.c
+@@ -28,6 +28,7 @@
+ #include <sys/types.h>
+ #include <pwd.h>
+
++#ifdef HAVE_SYSTEMD
+ #include <systemd/sd-login.h>
+
+ #include <glib.h>
+@@ -1096,4 +1097,11 @@ sd_proxy_signal_cb (GDBusProxy  *proxy,
+         }
+ }
+
++#else
++GsmSystemd *
++gsm_systemd_new (void)
++{
++        return NULL;
++}
++#endif
+
+--- a/gnome-session/leader-main.c
++++ b/gnome-session/leader-main.c
+@@ -29,6 +29,7 @@
+ #include "gsm-util.h"
+
+ #define INIT_WORKER_PATH (LIBEXECDIR "/gnome-session-init-worker")
++#define SERVICE_PATH (LIBEXECDIR "/gnome-session-service")
+
+ static char *
+ shell_to_login_shell (const char *shell)
+@@ -253,8 +254,13 @@ main (int argc, char **argv)
+          * The init system is responsible for starting up the rest of GNOME. Upstream we
+          * only support systemd, but to make it possible to integrate GNOME with other inits
+          * we've factored out the systemd-specific code into a separate init-worker binary. */
++#ifdef HAVE_SYSTEMD
+         if (execl(INIT_WORKER_PATH, INIT_WORKER_PATH, session_name, NULL) < 0)
+-            g_error ("Failed to exec gnome-session-init-worker: %m");
++                g_error ("Failed to exec gnome-session-init-worker: %m");
++#else
++        if (execl(SERVICE_PATH, SERVICE_PATH, "--session", session_name, NULL) < 0)
++                g_error ("Failed to exec gnome-session-service: %m");
++#endif
+
+         g_assert_not_reached ();
+         return 1;
+--- a/gnome-session/meson.build
++++ b/gnome-session/meson.build
+@@ -19,6 +19,7 @@ executable(
+   install_dir: session_bindir
+ )
+
++if get_option('systemd')
+ sources = files(
+     'gsm-util.c',
+     'leader-systemd.c',
+@@ -33,6 +34,7 @@ executable(
+   install: true,
+   install_dir: session_libexecdir
+ )
++endif
+
+ sources = files(
+   'gsm-app.c',
+--- a/meson.build
++++ b/meson.build
+@@ -88,9 +88,14 @@ session_deps = [
+   dependency('gnome-desktop-4'),
+ ]
+
+-libsystemd_dep = dependency('libsystemd', version: '>= 209', required: true)
+-config_h.set('SYSTEMD_STRICT_ENV',
+-              libsystemd_dep.version().version_compare('< 248'))
++if get_option('systemd')
++  libsystemd_dep = dependency('libsystemd', version: '>= 209')
++  config_h.set('HAVE_SYSTEMD', true)
++  config_h.set('SYSTEMD_STRICT_ENV',
++                libsystemd_dep.version().version_compare('< 248'))
++else
++  libsystemd_dep = declare_dependency()
++endif
+
+ session_bin_deps = session_deps + [
+   libsystemd_dep,
+@@ -98,7 +103,7 @@ session_bin_deps = session_deps + [
+ ]
+
+ systemd_userunitdir = get_option('systemduserunitdir')
+-if systemd_userunitdir == ''
++if get_option('systemd') and systemd_userunitdir == ''
+   systemd_dep = dependency('systemd', version: '>= 242', required: true)
+   systemd_userunitdir = systemd_dep.get_variable(pkgconfig: 'systemduserunitdir',
+                                                  pkgconfig_define: ['prefix', session_prefix])
+--- a/tools/meson.build
++++ b/tools/meson.build
+@@ -1,9 +1,12 @@
+ programs = [
+   # name, deps, install_dir
+-  ['gnome-session-ctl', session_bin_deps, session_libexecdir],
+   ['gnome-session-inhibit', session_deps, session_bindir],
+   ['gnome-session-quit', session_deps, session_bindir],
+ ]
++
++if get_option('systemd')
++  programs += [['gnome-session-ctl', session_bin_deps, session_libexecdir]]
++endif
+
+ foreach program: programs
+   executable(
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -4,3 +4,4 @@
+ option('man', type: 'boolean', value: true, description: 'build documentation')
+ option('x11', type: 'boolean', value: false, description: 'enable x11 session support')
+ option('mimeapps', type: 'boolean', value: true, description: 'install default gnome-mimeapps.list')
++option('systemd', type: 'boolean', value: true, description: 'use systemd for session startup and integration')

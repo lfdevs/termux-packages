@@ -1,0 +1,228 @@
+From efe964d65e05a71ddd9acd6def7d29d3e4e2e303 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Tue, 4 Aug 2026 00:23:01 +0800
+Subject: [PATCH 18/27] backends/anland: Map input to logical output
+ coordinates
+
+Anland reports pointer and touch positions in consumer buffer pixels, while Clutter constrains them in the logical monitor coordinate space. With GNOME output scaling, raw positions beyond the logical right and bottom edges were clamped and created a return dead zone.
+
+Map absolute pointer and touch positions plus relative pointer deltas from the current consumer extent into the primary logical monitor layout before native input injection. This keeps physical-layout and scale-one behavior unchanged.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0009-backends-anland-Map-input-to-logical-output-coordinates.patch
+
+diff --git a/src/backends/anland/meta-anland-input.c b/src/backends/anland/meta-anland-input.c
+index 0b2bde734d..00fd4dfa5b 100644
+--- a/src/backends/anland/meta-anland-input.c
++++ b/src/backends/anland/meta-anland-input.c
+@@ -5,6 +5,8 @@
+ #include "backends/anland/meta-anland-input.h"
+ 
+ #include "backends/meta-backend-private.h"
++#include "backends/meta-logical-monitor.h"
++#include "backends/meta-monitor-manager-private.h"
+ #include "backends/native/meta-virtual-input-device-native.h"
+ 
+ #include <linux/input.h>
+@@ -18,6 +20,7 @@
+ 
+ struct _MetaAnlandInput
+ {
++  MetaBackend *backend;
+   ClutterVirtualInputDevice *pointer;
+   ClutterVirtualInputDevice *keyboard;
+   ClutterVirtualInputDevice *touchscreen;
+@@ -32,6 +35,45 @@ struct _MetaAnlandInput
+   gpointer refresh_user_data;
+ };
+ 
++static void
++map_input_coordinates (MetaAnlandInput *input,
++                       uint32_t         input_width,
++                       uint32_t         input_height,
++                       float            x,
++                       float            y,
++                       gboolean         is_delta,
++                       float           *mapped_x,
++                       float           *mapped_y)
++{
++  MetaMonitorManager *monitor_manager;
++  MetaLogicalMonitor *logical_monitor;
++  MtkRectangle layout;
++
++  *mapped_x = x;
++  *mapped_y = y;
++
++  if (input_width == 0 || input_height == 0)
++    return;
++
++  monitor_manager = meta_backend_get_monitor_manager (input->backend);
++  logical_monitor =
++    meta_monitor_manager_get_primary_logical_monitor (monitor_manager);
++  if (!logical_monitor)
++    return;
++
++  layout = meta_logical_monitor_get_layout (logical_monitor);
++
++  /* Anland reports buffer pixels, while Clutter uses the logical layout. */
++  *mapped_x = x * layout.width / input_width;
++  *mapped_y = y * layout.height / input_height;
++
++  if (!is_delta)
++    {
++      *mapped_x += layout.x;
++      *mapped_y += layout.y;
++    }
++}
++
+ static gboolean
+ is_finite_pair (float x,
+                 float y)
+@@ -161,16 +203,26 @@ flush_touch_batch (MetaAnlandInput *input)
+ 
+ static void
+ handle_pointer_motion (MetaAnlandInput         *input,
+-                       const struct InputEvent *event)
++                       const struct InputEvent *event,
++                       uint32_t                 input_width,
++                       uint32_t                 input_height)
+ {
++  float x, y, dx, dy;
++
+   if (!is_finite_pair (event->pointer_motion.x, event->pointer_motion.y) ||
+       !is_finite_pair (event->pointer_motion.dx, event->pointer_motion.dy))
+     return;
+ 
++  map_input_coordinates (input, input_width, input_height,
++                         event->pointer_motion.x, event->pointer_motion.y,
++                         FALSE, &x, &y);
++  map_input_coordinates (input, input_width, input_height,
++                         event->pointer_motion.dx, event->pointer_motion.dy,
++                         TRUE, &dx, &dy);
++
+   meta_virtual_input_device_native_notify_absolute_relative_motion (
+     META_VIRTUAL_INPUT_DEVICE_NATIVE (input->pointer), g_get_monotonic_time (),
+-    event->pointer_motion.x, event->pointer_motion.y,
+-    event->pointer_motion.dx, event->pointer_motion.dy);
++    x, y, dx, dy);
+ }
+ 
+ static void
+@@ -255,17 +307,26 @@ handle_key (MetaAnlandInput         *input,
+ 
+ static void
+ handle_touch (MetaAnlandInput         *input,
+-              const struct InputEvent *event)
++              const struct InputEvent *event,
++              uint32_t                 input_width,
++              uint32_t                 input_height)
+ {
+   gpointer value;
+   int slot;
+   MetaVirtualTouchEvent touch_event;
++  float x, y;
+ 
+   if ((event->touch.action == INPUT_ACTION_DOWN ||
+        event->touch.action == INPUT_ACTION_MOVE) &&
+       !is_finite_pair (event->touch.x, event->touch.y))
+     return;
+ 
++  if (event->touch.action == INPUT_ACTION_DOWN ||
++      event->touch.action == INPUT_ACTION_MOVE)
++    map_input_coordinates (input, input_width, input_height,
++                           event->touch.x, event->touch.y,
++                           FALSE, &x, &y);
++
+   value = g_hash_table_lookup (input->touch_slots,
+                                GINT_TO_POINTER (event->touch.pointer_id));
+   switch (event->touch.action)
+@@ -287,8 +348,8 @@ handle_touch (MetaAnlandInput         *input,
+       touch_event = (MetaVirtualTouchEvent) {
+         .type = META_VIRTUAL_TOUCH_EVENT_DOWN,
+         .slot = slot,
+-        .x = event->touch.x,
+-        .y = event->touch.y,
++        .x = x,
++        .y = y,
+       };
+       break;
+     case INPUT_ACTION_MOVE:
+@@ -297,8 +358,8 @@ handle_touch (MetaAnlandInput         *input,
+       touch_event = (MetaVirtualTouchEvent) {
+         .type = META_VIRTUAL_TOUCH_EVENT_MOTION,
+         .slot = GPOINTER_TO_UINT (value) - 1,
+-        .x = event->touch.x,
+-        .y = event->touch.y,
++        .x = x,
++        .y = y,
+       };
+       break;
+     case INPUT_ACTION_UP:
+@@ -343,6 +404,7 @@ meta_anland_input_new (MetaBackend               *backend,
+     }
+ 
+   input = g_new0 (MetaAnlandInput, 1);
++  input->backend = backend;
+   input->touch_slots = g_hash_table_new (g_direct_hash, g_direct_equal);
+   input->touch_batch = g_array_new (FALSE, FALSE, sizeof (MetaVirtualTouchEvent));
+   input->pointer = clutter_seat_create_virtual_device (seat,
+@@ -387,12 +449,14 @@ meta_anland_input_free (MetaAnlandInput *input)
+ MetaAnlandInputEventResult
+ meta_anland_input_handle_event (MetaAnlandInput         *input,
+                                 MetaAnlandTransport     *transport,
+-                                const struct InputEvent *event)
++                                const struct InputEvent *event,
++                                uint32_t                 input_width,
++                                uint32_t                 input_height)
+ {
+   switch (event->type)
+     {
+     case INPUT_TYPE_POINTER_MOTION:
+-      handle_pointer_motion (input, event);
++      handle_pointer_motion (input, event, input_width, input_height);
+       break;
+     case INPUT_TYPE_POINTER_BUTTON:
+       handle_pointer_button (input, event);
+@@ -404,7 +468,7 @@ meta_anland_input_handle_event (MetaAnlandInput         *input,
+       handle_key (input, event);
+       break;
+     case INPUT_TYPE_TOUCH:
+-      handle_touch (input, event);
++      handle_touch (input, event, input_width, input_height);
+       break;
+     case INPUT_TYPE_TOUCH_FRAME:
+       flush_touch_batch (input);
+diff --git a/src/backends/anland/meta-anland-input.h b/src/backends/anland/meta-anland-input.h
+index 46c48698a2..fe9eaa886f 100644
+--- a/src/backends/anland/meta-anland-input.h
++++ b/src/backends/anland/meta-anland-input.h
+@@ -27,9 +27,11 @@ MetaAnlandInput * meta_anland_input_new (MetaBackend                *backend,
+ void meta_anland_input_free (MetaAnlandInput *input);
+ 
+ MetaAnlandInputEventResult
+-         meta_anland_input_handle_event (MetaAnlandInput          *input,
+-                                         MetaAnlandTransport      *transport,
+-                                         const struct InputEvent  *event);
++meta_anland_input_handle_event (MetaAnlandInput          *input,
++                                MetaAnlandTransport      *transport,
++                                const struct InputEvent  *event,
++                                uint32_t                  input_width,
++                                uint32_t                  input_height);
+ gboolean meta_anland_input_inject_text (MetaAnlandInput *input,
+                                         const char      *text);
+ void meta_anland_input_reset (MetaAnlandInput *input);
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index aa5db4ac21..1b2b18cb70 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -605,7 +605,9 @@ input_source_dispatch (gpointer user_data)
+ 
+       input_result = meta_anland_input_handle_event (backend->input,
+                                                       backend->transport,
+-                                                      &event);
++                                                      &event,
++                                                      backend->screen_info.width,
++                                                      backend->screen_info.height);
+       if (input_result == META_ANLAND_INPUT_EVENT_NEEDS_PAYLOAD)
+         {
+           if (!handle_extended_input (backend, &event))

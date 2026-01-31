@@ -52,6 +52,12 @@ termux_setup_bpc() {
 	fi
 
 	export PATH="$_BPC_FOLDER/bin:$PATH"
+	local _BPC_PYTHON_SITE_PACKAGES
+	_BPC_PYTHON_SITE_PACKAGES="$(find "$_BPC_FOLDER" -type d -name blueprintcompiler -print -quit)"
+	if [[ -n "$_BPC_PYTHON_SITE_PACKAGES" ]]; then
+		_BPC_PYTHON_SITE_PACKAGES="${_BPC_PYTHON_SITE_PACKAGES%/blueprintcompiler}"
+		export PYTHONPATH="$_BPC_PYTHON_SITE_PACKAGES${PYTHONPATH:+:$PYTHONPATH}"
+	fi
 	export GI_TYPELIB_PATH="$TERMUX_PREFIX/lib/girepository-1.0"
 	# fixes ModuleNotFoundError: No module named 'blueprintcompiler'
 	# after a version recent to the writing of this comment

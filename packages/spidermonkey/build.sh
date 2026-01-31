@@ -2,13 +2,17 @@ TERMUX_PKG_HOMEPAGE=https://spidermonkey.dev
 TERMUX_PKG_DESCRIPTION="Mozilla's JavaScript engine"
 TERMUX_PKG_LICENSE="MPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="128.10.0"
-TERMUX_PKG_REVISION=2
-_REAL_VERSION=${TERMUX_PKG_VERSION}esr
-TERMUX_PKG_SRCURL=https://archive.mozilla.org/pub/firefox/releases/$_REAL_VERSION/source/firefox-$_REAL_VERSION.source.tar.xz
-TERMUX_PKG_SHA256=2ed83e26e41a8b3e2c7c0d13448a84dbb9b7ed65ed46bc162d629b0c6b071caf
+TERMUX_PKG_VERSION="140.7.0"
+TERMUX_PKG_REVISION=1
+TERMUX_PKG_SRCURL="https://archive.mozilla.org/pub/firefox/releases/${TERMUX_PKG_VERSION}esr/source/firefox-${TERMUX_PKG_VERSION}esr.source.tar.xz"
+TERMUX_PKG_SHA256=608a739071726f30236f7100ec5e30e1b8ec342d4e91e715948c287909cb1529
 TERMUX_PKG_DEPENDS="libicu, libnspr, libnss, zlib"
 TERMUX_PKG_BUILD_IN_SRC=true
+
+# Firefox 140's mach only supports Python 3.12 or lower.
+_MOZILLA_PYTHON_VERSION=3.12.12
+_MOZILLA_PYTHON_SRCURL=https://www.python.org/ftp/python/${_MOZILLA_PYTHON_VERSION}/Python-${_MOZILLA_PYTHON_VERSION}.tar.xz
+_MOZILLA_PYTHON_SHA256=fb85a13414b028c49ba18bbd523c2d055a30b56b18b92ce454ea2c51edc656c4
 
 termux_step_post_get_source() {
 	local f="media/ffvpx/config_unix_aarch64.h"
@@ -17,6 +21,10 @@ termux_step_post_get_source() {
 }
 
 termux_step_pre_configure() {
+	termux_setup_build_python \
+		"$_MOZILLA_PYTHON_VERSION" \
+		"$_MOZILLA_PYTHON_SRCURL" \
+		"$_MOZILLA_PYTHON_SHA256"
 	termux_setup_nodejs
 	termux_setup_rust
 

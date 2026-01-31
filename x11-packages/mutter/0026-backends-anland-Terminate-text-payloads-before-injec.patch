@@ -1,0 +1,47 @@
+From a3eafe482007cc4df1fd1a0c5bfc56d686ed7256 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Fri, 7 Aug 2026 01:16:15 +0800
+Subject: [PATCH 26/27] backends/anland: Terminate text payloads before
+ injection
+
+Anland text input arrives as a length-delimited GBytes payload, which does not guarantee a trailing NUL byte. Passing its data directly to the text-input and virtual-key helpers makes them scan beyond the payload and inject adjacent heap bytes as spurious input.
+
+Copy text input into a NUL-terminated string before dispatching it, while keeping clipboard payloads length-delimited.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0018-backends-anland-Terminate-text-payloads-before-injection.patch
+
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index ab8cd0d16c..e7262557e5 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -121,6 +121,7 @@ handle_extended_input (MetaBackendAnland       *backend,
+                        const struct InputEvent *event)
+ {
+   g_autoptr (GBytes) contents = NULL;
++  g_autofree char *input_text = NULL;
+   const char *text;
+   guint size;
+ 
+@@ -152,17 +153,19 @@ handle_extended_input (MetaBackendAnland       *backend,
+     return meta_anland_clipboard_set_from_consumer (backend->clipboard,
+                                                     contents);
+ 
++  input_text = g_strndup (text, size);
++
+   {
+     MetaContext *context = meta_backend_get_context (META_BACKEND (backend));
+     MetaWaylandCompositor *compositor =
+       meta_context_get_wayland_compositor (context);
+ 
+     if (compositor && meta_wayland_text_input_commit_string (
+-          meta_wayland_compositor_get_text_input (compositor), text))
++          meta_wayland_compositor_get_text_input (compositor), input_text))
+       return TRUE;
+   }
+ 
+-  return meta_anland_input_inject_text (backend->input, text);
++  return meta_anland_input_inject_text (backend->input, input_text);
+ }
+ 
+ static void

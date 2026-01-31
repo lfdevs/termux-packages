@@ -1,0 +1,55 @@
+From 91454ba45d0f91d123d2d90d346cf1eef08c76fe Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Wed, 5 Aug 2026 02:25:21 +0800
+Subject: [PATCH 21/27] backends/anland: Detach consumer before stage rebuilds
+
+Display configuration changes such as monitor scaling rebuild the native
+renderer views even when the virtual monitor mode remains unchanged. Anland
+kept its imported consumer framebuffers, present callback, and inhibited frame
+clock attached to the old StageView, allowing the compositor to access invalid
+stage state during the rebuild.
+
+Override the stage update hook to deactivate the consumer and release the old
+view before chaining to the native backend. Schedule the existing reconnect
+path afterwards so rendering resumes against the replacement view.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0013-backends-anland-Detach-consumer-before-stage-rebuilds.patch
+
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index ec15a2fe84..ab8cd0d16c 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -961,6 +961,24 @@ meta_backend_anland_init_post (MetaBackend  *backend,
+   return TRUE;
+ }
+ 
++static void
++meta_backend_anland_update_stage (MetaBackend *backend)
++{
++  MetaBackendAnland *backend_anland = META_BACKEND_ANLAND (backend);
++  MetaBackendClass *parent_class =
++    META_BACKEND_CLASS (meta_backend_anland_parent_class);
++  gboolean had_stage_view = backend_anland->stage_view != NULL;
++
++  if (backend_anland->consumer_active)
++    deactivate_consumer (backend_anland);
++  release_stage_view (backend_anland);
++
++  parent_class->update_stage (backend);
++
++  if (had_stage_view && backend_anland->transport)
++    schedule_reconnect (backend_anland);
++}
++
+ static void
+ meta_backend_anland_set_property (GObject      *object,
+                                   guint         prop_id,
+@@ -1016,6 +1034,7 @@ meta_backend_anland_class_init (MetaBackendAnlandClass *klass)
+   object_class->set_property = meta_backend_anland_set_property;
+   object_class->dispose = meta_backend_anland_dispose;
+   backend_class->init_post = meta_backend_anland_init_post;
++  backend_class->update_stage = meta_backend_anland_update_stage;
+ 
+   g_object_class_install_property (
+     object_class, PROP_ANLAND_SOCKET,

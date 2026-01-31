@@ -1,0 +1,36 @@
+From 3c10cd671e92b451449b071cea850ba424441f8b Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Wed, 5 Aug 2026 14:18:01 +0800
+Subject: [PATCH 24/27] xwayland: Read displayfd readiness data
+
+PRoot can report only G_IO_HUP when Xwayland writes its display name and closes the displayfd socket. Treating the missing G_IO_IN flag as a startup failure leaves the private initialization connection unopened, which blocks all public X11 clients.
+
+Read the pending display name from the socket and consider Xwayland ready only when data is present. An Xwayland process that exits before announcing readiness still produces EOF and remains a failure.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0016-xwayland-Read-displayfd-readiness-data.patch
+
+diff --git a/src/wayland/meta-xwayland.c b/src/wayland/meta-xwayland.c
+index 808f7fc17c..ee7a894cf7 100644
+--- a/src/wayland/meta-xwayland.c
++++ b/src/wayland/meta-xwayland.c
+@@ -769,12 +769,15 @@ on_displayfd_ready (int          fd,
+                     gpointer     user_data)
+ {
+   GTask *task = user_data;
++  char display_name[16];
++  ssize_t bytes_read;
+ 
+   /* The server writes its display name to the displayfd
+-   * socket when it's ready. We don't care about the data
+-   * in the socket, just that it wrote something, since
+-   * that means it's ready. */
+-  g_task_return_boolean (task, !!(condition & G_IO_IN));
++   * socket when it's ready. PRoot may only report G_IO_HUP
++   * after Xwayland writes and closes the socket, so check
++   * the pending data instead of relying on the condition. */
++  bytes_read = recv (fd, display_name, sizeof (display_name), MSG_DONTWAIT);
++  g_task_return_boolean (task, bytes_read > 0);
+   g_object_unref (task);
+ 
+   return G_SOURCE_REMOVE;
