@@ -4,7 +4,6 @@ TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="docs/license.rst"
 TERMUX_PKG_MAINTAINER="xMeM <haooy@outlook.com>"
 TERMUX_PKG_VERSION="25.0.0"
-TERMUX_PKG_REVISION=2
 TERMUX_PKG_SRCURL=git+https://github.com/xMeM/mesa
 TERMUX_PKG_GIT_BRANCH=wrapper
 _COMMIT=e65c7eb6ee2f9903c3256f2677beb1d98464103f
@@ -19,7 +18,7 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -Dopengl=false
 -Dllvm=disabled
 -Dshared-llvm=disabled
--Dplatforms=x11,wayland
+-Dplatforms=x11
 -Dgallium-drivers=
 -Dxmlconfig=disabled
 -Dvulkan-drivers=wrapper
@@ -35,6 +34,10 @@ termux_step_post_get_source() {
 
 termux_step_pre_configure() {
 	termux_setup_cmake
+
+	if [ "$TERMUX_ON_DEVICE_BUILD" = "true" ]; then
+		CFLAGS+=" --target=$TERMUX_HOST_PLATFORM$TERMUX_PKG_API_LEVEL"
+	fi
 
 	CPPFLAGS+=" -D__USE_GNU"
 	LDFLAGS+=" -landroid-shmem"
