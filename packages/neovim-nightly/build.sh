@@ -2,29 +2,25 @@ TERMUX_PKG_HOMEPAGE=https://neovim.io/
 TERMUX_PKG_DESCRIPTION="Ambitious Vim-fork focused on extensibility and agility (nvim-nightly)"
 TERMUX_PKG_LICENSE="Apache-2.0, VIM License"
 TERMUX_PKG_LICENSE_FILE="LICENSE.txt"
-TERMUX_PKG_MAINTAINER="Joshua Kahn @TomJo2000"
-TERMUX_PKG_VERSION="0.12.0~dev-2062+g30259d6af7"
-TERMUX_PKG_SRCURL=https://github.com/neovim/neovim/archive/${TERMUX_PKG_VERSION##*+g}.tar.gz
-TERMUX_PKG_SHA256=82c7e83ff083894d093155b05a2921e78f0daab6ae32b5680fadc2efb74177a5
-TERMUX_PKG_AUTO_UPDATE=true
-TERMUX_PKG_UPDATE_VERSION_REGEXP="v.*-dev.*\+g[0-9a-f]*"
-TERMUX_PKG_UPDATE_VERSION_SED_REGEXP="s/-/~/"
-TERMUX_PKG_DEPENDS="libiconv, libuv, luv, libmsgpack, libvterm (>= 1:0.3-0), luajit, libunibilium, libandroid-support, lua51-lpeg, tree-sitter, tree-sitter-parsers, utf8proc"
+TERMUX_PKG_MAINTAINER="Joshua Kahn <tom@termux.dev>"
+TERMUX_PKG_VERSION="0.12.0~dev-2258+g886efcb853"
+TERMUX_PKG_SRCURL="https://github.com/neovim/neovim/archive/${TERMUX_PKG_VERSION##*+g}.tar.gz"
+TERMUX_PKG_SHA256=5164b8740b3fafc5fa2a7e82d29a99468ea72c39eccffca546a337cef1fe58b0
+TERMUX_PKG_DEPENDS="libandroid-support, libiconv, libmsgpack, libunibilium, libuv, libvterm (>= 1:0.3-0), lua51-lpeg, luajit, luv, tree-sitter, tree-sitter-parsers, utf8proc"
 TERMUX_PKG_BREAKS="neovim"
 TERMUX_PKG_CONFLICTS="neovim"
 TERMUX_PKG_HOSTBUILD=true
+TERMUX_PKG_CONFFILES="share/nvim/sysinit.vim"
+TERMUX_PKG_AUTO_UPDATE=true
+TERMUX_PKG_UPDATE_VERSION_REGEXP="v.*-dev.*\+g[0-9a-f]*"
+TERMUX_PKG_UPDATE_VERSION_SED_REGEXP="s/-/~/"
 
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -DENABLE_JEMALLOC=OFF
--DGETTEXT_MSGFMT_EXECUTABLE=$(command -v msgfmt)
--DGETTEXT_MSGMERGE_EXECUTABLE=$(command -v msgmerge)
--DPKG_CONFIG_EXECUTABLE=$(command -v pkg-config)
--DXGETTEXT_PRG=$(command -v xgettext)
 -DLUAJIT_INCLUDE_DIR=$TERMUX_PREFIX/include/luajit-2.1
 -DLPEG_LIBRARY=$TERMUX_PREFIX/lib/liblpeg-5.1.so
 -DCOMPILE_LUA=OFF
 "
-TERMUX_PKG_CONFFILES="share/nvim/sysinit.vim"
 
 termux_pkg_auto_update() {
 	local response commit latest_nightly
@@ -77,7 +73,16 @@ termux_step_host_build() {
 }
 
 termux_step_pre_configure() {
-	TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -DLUA_MATH_LIBRARY=$TERMUX_STANDALONE_TOOLCHAIN/sysroot/usr/lib/$TERMUX_HOST_PLATFORM/$TERMUX_PKG_API_LEVEL/libm.so"
+	# msgfmt etc. need to be set here rather than globally, because if set globally,
+	# scripts/bin/update-checksum would fail to source this build.sh during the auto update
+	# workflow that doesn't have those commands present since it hasn't run setup-ubuntu.sh
+	TERMUX_PKG_EXTRA_CONFIGURE_ARGS+="
+	-DLUA_MATH_LIBRARY=$TERMUX_STANDALONE_TOOLCHAIN/sysroot/usr/lib/$TERMUX_HOST_PLATFORM/$TERMUX_PKG_API_LEVEL/libm.so
+	-DGETTEXT_MSGFMT_EXECUTABLE=$(command -v msgfmt)
+	-DGETTEXT_MSGMERGE_EXECUTABLE=$(command -v msgmerge)
+	-DPKG_CONFIG_EXECUTABLE=$(command -v pkg-config)
+	-DXGETTEXT_PRG=$(command -v xgettext)
+	"
 
 	# neovim has a weird CMake file that attempts to preprocess generated headers
 	# using the NDK Clang, but without ever adding the necessary --target argument
@@ -96,9 +101,9 @@ termux_step_pre_configure() {
 termux_step_post_make_install() {
 	local _CONFIG_DIR=$TERMUX_PREFIX/share/nvim
 	mkdir -p "$_CONFIG_DIR"
-	cp "$TERMUX_PKG_BUILDER_DIR/sysinit.vim" "$_CONFIG_DIR/"
 
 	# Tree-sitter grammars are packaged separately and installed into TERMUX_PREFIX/lib/tree_sitter.
+	rm -f "${TERMUX_PREFIX}"/share/nvim/runtime/parser
 	ln -sf "${TERMUX_PREFIX}"/lib/tree_sitter "${TERMUX_PREFIX}"/share/nvim/runtime/parser
 
 	# Move the `nvim` binary to $PREFIX/libexec
@@ -110,6 +115,11 @@ termux_step_post_make_install() {
 		"$TERMUX_PKG_BUILDER_DIR/nvim-shim.sh" \
 		> "${TERMUX_PREFIX}/bin/nvim"
 	chmod 700 "${TERMUX_PREFIX}/bin/nvim"
+
+	# Add termux specific configuration
+	sed -e "s|@TERMUX_PREFIX@|${TERMUX_PREFIX}|g" \
+		"$TERMUX_PKG_BUILDER_DIR/sysinit.vim" \
+		> "$_CONFIG_DIR/sysinit.vim"
 
 	{ # Set up a wrapper script for `ex` to be called by `update-alternatives`
 		echo "#!$TERMUX_PREFIX/bin/sh"

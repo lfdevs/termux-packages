@@ -3,15 +3,16 @@ TERMUX_PKG_DESCRIPTION="Magical shell history"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="../../LICENSE"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="18.10.0"
-TERMUX_PKG_SRCURL=https://github.com/ellie/atuin/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=02228929976142f63b4464a35b8b29b29155e1814cf03e99c95381954c5d9e37
+TERMUX_PKG_VERSION="18.12.0"
+TERMUX_PKG_SRCURL="https://github.com/atuinsh/atuin/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz"
+TERMUX_PKG_SHA256=d64f62d11cab68c1a27008550782873af54ad55833c637cd8542071071004983
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_BUILD_IN_SRC=true
 
 termux_step_pre_configure() {
 	termux_setup_protobuf
 	termux_setup_rust
+	termux_setup_cmake
 	TERMUX_PKG_SRCDIR+="/crates/atuin"
 	TERMUX_PKG_BUILDDIR="$TERMUX_PKG_SRCDIR"
 
