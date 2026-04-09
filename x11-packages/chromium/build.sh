@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://www.chromium.org/Home
 TERMUX_PKG_DESCRIPTION="Chromium web browser"
 TERMUX_PKG_LICENSE="BSD 3-Clause"
 TERMUX_PKG_MAINTAINER="@licy183"
-TERMUX_PKG_VERSION="144.0.7559.109"
+TERMUX_PKG_VERSION=146.0.7680.164
 TERMUX_PKG_SRCURL=https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$TERMUX_PKG_VERSION-lite.tar.xz
-TERMUX_PKG_SHA256=06c6bf558a17636070495d2d33117501c361c6984d71356188cdfae7d9ee8bc1
+TERMUX_PKG_SHA256=2d4163d39cc85c58d0bad83ccb5f200174cc99e3627fc56b095025f1ae7038c8
 TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libxkbcommon, libminizip, libnss, libx11, mesa, openssl, pango, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="chromium-host-tools, libffi-static"
 # TODO: Split chromium-common and chromium-headless
@@ -12,8 +12,8 @@ TERMUX_PKG_BUILD_DEPENDS="chromium-host-tools, libffi-static"
 # TERMUX_PKG_SUGGESTS="chromium-headless, chromium-driver"
 # Chromium doesn't support i686 on Linux.
 TERMUX_PKG_EXCLUDED_ARCHES="i686"
-TERMUX_PKG_ON_DEVICE_BUILD_NOT_SUPPORTED=true
 TERMUX_PKG_AUTO_UPDATE=false
+TERMUX_PKG_ON_DEVICE_BUILD_NOT_SUPPORTED=true
 
 SYSTEM_LIBRARIES="    fontconfig"
 # TERMUX_PKG_DEPENDS="fontconfig"
@@ -62,6 +62,13 @@ termux_step_post_get_source() {
 	if [ "${version_tools}" != "${TERMUX_PKG_VERSION}" ]; then
 		termux_error_exit "Version mismatch between chromium-host-tools and chromium."
 	fi
+
+	# Apply patches related to c++23
+	local f
+	for f in $(find "$TERMUX_PKG_BUILDER_DIR/../chromium-host-tools/cxx-patches" -maxdepth 1 -type f -name *.patch | sort); do
+		echo "Applying patch: $(basename $f)"
+		patch -p1 --silent < "$f"
+	done
 
 	# Apply patches related to chromium
 	local f
@@ -141,6 +148,38 @@ EOF
 	# Install nodejs
 	if [ ! -f "third_party/node/linux/node-linux-x64/bin/node" ]; then
 		./third_party/node/update_node_binaries
+	fi
+
+	# Download npm deps
+	if [ ! -d "third_party/node/node_modules" ]; then
+		local _npm_object_name=$(python -c "Var = str
+Str = str
+exec(open('$TERMUX_PKG_SRCDIR/DEPS').read())
+print(deps['src/third_party/node/node_modules']['objects'][0]['object_name'])
+")
+		local _npm_sha256sum=$(python -c "Var = str
+Str = str
+exec(open('$TERMUX_PKG_SRCDIR/DEPS').read())
+print(deps['src/third_party/node/node_modules']['objects'][0]['sha256sum'])
+")
+		local _npm_file="$TERMUX_PKG_SRCDIR/third_party/node/node_modules.tar.gz"
+		termux_download \
+			"https://commondatastorage.googleapis.com/chromium-nodejs/$_npm_object_name" \
+			"${_npm_file}" \
+			"${_npm_sha256sum}"
+		mkdir -p $TERMUX_PKG_SRCDIR/third_party/node/node_modules-tmp
+		tar -xf "$_npm_file" --strip-components=1 -C "$TERMUX_PKG_SRCDIR/third_party/node/node_modules-tmp"
+		mv "$TERMUX_PKG_SRCDIR/third_party/node/node_modules-tmp" "$TERMUX_PKG_SRCDIR/third_party/node/node_modules"
+	fi
+
+	# Sync rollup-related native deps in devtools
+	if [ ! -d "third_party/devtools-frontend/src/node_modules/@rollup/rollup-linux-x64-gnu" ]; then
+		if [ ! -f "third_party/devtools-frontend/src/third_party/rollup_libs/rollup.linux-x64-gnu.node" ]; then
+			termux_error_exit "rollup.linux-x64-gnu.node not found"
+		fi
+		pushd third_party/devtools-frontend/src
+		python3 scripts/deps/sync_rollup_libs.py
+		popd # third_party/devtools-frontend/src
 	fi
 
 	local CARGO_TARGET_NAME="${TERMUX_ARCH}-linux-android"
@@ -288,6 +327,9 @@ exclude_unwind_tables = false
 use_jumbo_build = true
 # Compile pdfium as a static library
 pdf_is_complete_lib = true
+# NDK r29 can't compile chromium with cxx23, see
+# https://github.com/termux/termux-packages/issues/28459#issuecomment-3991943697
+use_cxx23 = false
 " > $_common_args_file
 
 	if [ "$TERMUX_ARCH" = "arm" ]; then
@@ -436,9 +478,11 @@ termux_step_make_install() {
 	install -Dm644 $TERMUX_PKG_SRCDIR/chrome/installer/linux/common/desktop.template \
 		"$TERMUX_PREFIX/share/applications/chromium.desktop"
 	sed -i \
-		-e 's/@@MENUNAME@@/Chromium/g' \
-		-e 's/@@PACKAGE@@/chromium/g' \
-		-e 's/@@USR_BIN_SYMLINK_NAME@@/chromium-browser/g' \
+		-e 's/@@MENUNAME/Chromium/g' \
+		-e 's/@@PACKAGE/chromium/g' \
+		-e 's/@@usr_bin_symlink_name/chromium/g' \
+		-e 's|@@uri_scheme|x-scheme-handler/chromium;|g' \
+		-e 's/@@extra_desktop_entries//g' \
 		-e "s|Exec=/usr/bin|Exec=$TERMUX_PREFIX/bin|g" \
 		"$TERMUX_PREFIX/share/applications/chromium.desktop" \
 		"$TERMUX_PREFIX/share/man/man1/chromium.1"

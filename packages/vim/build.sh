@@ -10,9 +10,9 @@ TERMUX_PKG_CONFLICTS="vim-gtk"
 TERMUX_PKG_BREAKS="vim-python, vim-runtime"
 TERMUX_PKG_REPLACES="vim-python, vim-runtime"
 TERMUX_PKG_PROVIDES="vim-python"
-TERMUX_PKG_VERSION="9.1.2100"
+TERMUX_PKG_VERSION="9.2.0300"
 TERMUX_PKG_SRCURL="https://github.com/vim/vim/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz"
-TERMUX_PKG_SHA256=5042505291ff23f8388013b48c034dea13f4eea322880d077b0ce7c8210bd618
+TERMUX_PKG_SHA256=02d376f7d588c664742512aef724e7435e3b991bc8e9ed914123a624165598ff
 TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_CONFFILES="share/vim/vimrc"
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
@@ -29,8 +29,9 @@ ac_cv_small_wchar_t=no
 --with-tlib=ncursesw
 --enable-multibyte
 --with-compiledby=Termux
+--enable-fail-if-missing=yes
 --enable-python3interp=dynamic
---with-python3-config-dir=$TERMUX_PYTHON_HOME/config-${TERMUX_PYTHON_VERSION}/
+--with-python3-config-dir=$TERMUX_PYTHON_HOME/config-${TERMUX_PYTHON_VERSION}-${TERMUX_HOST_PLATFORM}/
 vi_cv_path_python3_pfx=$TERMUX_PREFIX
 vi_cv_path_python3_include=${TERMUX_PREFIX}/include/python${TERMUX_PYTHON_VERSION}
 vi_cv_path_python3_platinclude=${TERMUX_PREFIX}/include/python${TERMUX_PYTHON_VERSION}
@@ -46,12 +47,6 @@ vi_cv_var_python3_version=${TERMUX_PYTHON_VERSION}
 --enable-gui=no
 --without-x
 "
-
-TERMUX_PKG_RM_AFTER_INSTALL="
-share/vim/vim91/spell/en.ascii*
-share/vim/vim91/print
-share/vim/vim91/tools
-"
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_UPDATE_TAG_TYPE="newest-tag" # Vim doesn't use release tags
 
@@ -61,8 +56,11 @@ termux_pkg_auto_update() {
 	# remember to apply that change to the other as well.
 	local latest_tag current_patch latest_patch
 	latest_tag="$(termux_github_api_get_tag)"
-	latest_patch="${latest_tag##*.}"
-	current_patch="${TERMUX_PKG_VERSION##*.}"
+	# Specify Base 10 with the `10#` prefix.
+	# This is necessary to suppress automatic interpretation
+	# of the value as octal when there is a leading 0.
+	latest_patch="10#${latest_tag##*.}"
+	current_patch="10#${TERMUX_PKG_VERSION##*.}"
 
 	# Vim releases nearly every commit as a new tag.
 	# To avoid auto update spam, we only update Vim every 50th patch.
@@ -75,7 +73,8 @@ termux_pkg_auto_update() {
 		return
 	fi
 
-	termux_pkg_upgrade_version "${latest_tag%.*}.${latest_patch}"
+	# Pad the patch component of the version back to 4 digits in accordance with Vim's tag naming.
+	termux_pkg_upgrade_version "$(printf '%s.%04d' "${latest_tag%.*}" "${latest_patch}")"
 }
 
 termux_step_pre_configure() {
@@ -107,23 +106,33 @@ termux_step_pre_configure() {
 		"$patch" | patch --silent -p1
 }
 
+# shellcheck disable=SC2031
 termux_step_post_make_install() {
 	sed -e "s%\@TERMUX_PREFIX\@%${TERMUX_PREFIX}%g" "$TERMUX_PKG_BUILDER_DIR/vimrc" \
 		> "$TERMUX_PREFIX/share/vim/vimrc"
+
+	local _VIM_VERSION="${TERMUX_PKG_VERSION%.*}"
+	_VIM_VERSION="${_VIM_VERSION/.}"
+
+	export TERMUX_PKG_RM_AFTER_INSTALL="
+	share/vim/vim${_VIM_VERSION}/spell/en.ascii*
+	share/vim/vim${_VIM_VERSION}/print
+	share/vim/vim${_VIM_VERSION}/tools
+	"
 
 	### Remove most tutor files:
 	# Make a directory to temporarily hold the ones we want to keep
 	mkdir -p "$TERMUX_PKG_TMPDIR/vim-tutor"
 	# Copy what we want to keep into $TERMUX_PKG_TMPDIR/vim-tutor
-	cp -r   "$TERMUX_PREFIX/share/vim/vim91/tutor/en/" \
-			"$TERMUX_PREFIX/share/vim/vim91/tutor/tutor.vim" \
-			"$TERMUX_PREFIX/share/vim/vim91/tutor/tutor.tutor"{,.json} \
-			"$TERMUX_PREFIX/share/vim/vim91/tutor/tutor"{1,2} \
+	cp -r   "$TERMUX_PREFIX/share/vim/vim${_VIM_VERSION}/tutor/en/" \
+			"$TERMUX_PREFIX/share/vim/vim${_VIM_VERSION}/tutor/tutor.vim" \
+			"$TERMUX_PREFIX/share/vim/vim${_VIM_VERSION}/tutor/tutor.tutor"{,.json} \
+			"$TERMUX_PREFIX/share/vim/vim${_VIM_VERSION}/tutor/tutor"{1,2} \
 			"$TERMUX_PKG_TMPDIR/vim-tutor"
 	# Remove all the tutor files
-	rm -rf "$TERMUX_PREFIX/share/vim/vim91/tutor"/*
+	rm -rf "$TERMUX_PREFIX/share/vim/vim${_VIM_VERSION}/tutor"/*
 	# Copy back what we saved earlier
-	cp -r "$TERMUX_PKG_TMPDIR"/vim-tutor/* "$TERMUX_PREFIX/share/vim/vim91/tutor/"
+	cp -r "$TERMUX_PKG_TMPDIR"/vim-tutor/* "$TERMUX_PREFIX/share/vim/vim${_VIM_VERSION}/tutor/"
 	mkdir -p "$TERMUX_PREFIX/libexec/vim"
 	mv "${TERMUX_PREFIX}"/bin/{ex,view,vim{,diff,tutor}} "${TERMUX_PREFIX}"/libexec/vim
 }

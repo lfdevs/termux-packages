@@ -2,9 +2,10 @@ TERMUX_PKG_HOMEPAGE=https://github.com/apache/arrow
 TERMUX_PKG_DESCRIPTION="C++ libraries for Apache Arrow"
 TERMUX_PKG_LICENSE="Apache-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="23.0.0"
+TERMUX_PKG_VERSION="23.0.1"
+TERMUX_PKG_REVISION=2
 TERMUX_PKG_SRCURL="https://github.com/apache/arrow/archive/refs/tags/apache-arrow-${TERMUX_PKG_VERSION}.tar.gz"
-TERMUX_PKG_SHA256=7510f4b578febb3af5b3e93ad4616ae3cb680b0f651217ebb29f4c7e5ea952f3
+TERMUX_PKG_SHA256=9a9a057bba3aa7080abc2ba8e7a079effa74626a4f308ac56bfce035d31ef1ac
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="abseil-cpp, apache-orc, libandroid-execinfo, libc++, liblz4, libprotobuf, libre2, libsnappy, thrift, utf8proc, zlib, zstd"
 TERMUX_PKG_BUILD_DEPENDS="boost, boost-headers, rapidjson"
@@ -57,6 +58,7 @@ termux_step_post_make_install() {
 	TERMUX_PKG_BUILDDIR="$TERMUX_PKG_SRCDIR"
 	cd "$TERMUX_PKG_BUILDDIR"
 
+	export PYARROW_CMAKE_GENERATOR=Ninja
 	export PYARROW_CMAKE_OPTIONS="
 		-DCMAKE_PREFIX_PATH=$TERMUX_PREFIX/lib/cmake
 		-DNUMPY_INCLUDE_DIRS=$TERMUX_PYTHON_HOME/site-packages/numpy/_core/include
@@ -72,10 +74,10 @@ termux_step_post_make_install() {
 	termux_setup_ninja
 
 	# termux_step_make
-	PYTHONPATH='' python -m build -w -n -x "$TERMUX_PKG_SRCDIR"
+	python -m build -w -n -x "$TERMUX_PKG_SRCDIR"
 
 	# termux_step_make_install
 	local _pyver="${TERMUX_PYTHON_VERSION//./}"
-	local _wheel="pyarrow-${TERMUX_PKG_VERSION}-cp${_pyver}-cp${_pyver}-linux_${TERMUX_ARCH}.whl"
-	pip install --no-deps --prefix="$TERMUX_PREFIX" "$TERMUX_PKG_SRCDIR/dist/${_wheel}"
+	local _wheel="pyarrow-${TERMUX_PKG_VERSION}-cp${_pyver}-cp${_pyver}-android_${TERMUX_ARCH}.whl"
+	cross-pip install --no-deps --prefix="$TERMUX_PREFIX" "$TERMUX_PKG_SRCDIR/dist/${_wheel}"
 }

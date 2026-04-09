@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://www.chromium.org/Home
 TERMUX_PKG_DESCRIPTION="Chromium web browser (Host tools)"
 TERMUX_PKG_LICENSE="BSD 3-Clause"
 TERMUX_PKG_MAINTAINER="@licy183"
-TERMUX_PKG_VERSION=145.0.7632.45
+TERMUX_PKG_VERSION="146.0.7680.177"
 TERMUX_PKG_SRCURL=https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$TERMUX_PKG_VERSION-lite.tar.xz
-TERMUX_PKG_SHA256=a7ce8bd85d36e6c01d382e71c9018b0d118553a848e32dd399aea2e437476be1
+TERMUX_PKG_SHA256=e66465f7b26c91dfa06b31aba3c56f6e65edac6b227c6bd2edc04535ef8966cb
 TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libxkbcommon, libminizip, libnss, libx11, mesa, openssl, pango, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="libffi-static"
 # TODO: Split chromium-common and chromium-headless
@@ -59,6 +59,13 @@ termux_pkg_auto_update() {
 }
 
 termux_step_post_get_source() {
+	# Apply patches related to c++23
+	local f
+	for f in $(find "$TERMUX_PKG_BUILDER_DIR/cxx-patches" -maxdepth 1 -type f -name *.patch | sort); do
+		echo "Applying patch: $(basename $f)"
+		patch -p1 --silent < "$f"
+	done
+
 	# Apply patches related to chromium
 	local f
 	for f in $(find "$TERMUX_PKG_BUILDER_DIR/cr-patches" -maxdepth 1 -type f -name *.patch | sort); do
@@ -307,6 +314,9 @@ exclude_unwind_tables = false
 use_jumbo_build = true
 # Compile pdfium as a static library
 pdf_is_complete_lib = true
+# NDK r29 can't compile chromium with cxx23, see
+# https://github.com/termux/termux-packages/issues/28459#issuecomment-3991943697
+use_cxx23 = false
 " > $_common_args_file
 
 	if [ "$TERMUX_ARCH" = "arm" ]; then

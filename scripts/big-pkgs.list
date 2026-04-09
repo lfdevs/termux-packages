@@ -39,4 +39,6 @@ tinygo
 tinymist
 wasi-libc
 wasmer
+wezterm-nightly
+wine-stable
 zig

@@ -2,15 +2,15 @@ TERMUX_PKG_HOMEPAGE=https://lux.lumen-labs.org
 TERMUX_PKG_DESCRIPTION="A package manager for Lua, similar to luarocks"
 TERMUX_PKG_LICENSE="LGPL-3.0-or-later"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="0.25.2"
-TERMUX_PKG_REVISION=1
+TERMUX_PKG_VERSION="0.28.0"
 TERMUX_PKG_SRCURL="https://github.com/lumen-oss/lux/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz"
-TERMUX_PKG_SHA256=9b9b9ad11f22bf666ec48092126a352d752cd16c579e7713fdcb8da3a215fc5a
+TERMUX_PKG_SHA256=b38125c63c3317920eab3d97eb0fecf6f0feb42e2671aa6ac2697efea16de987
 TERMUX_PKG_DEPENDS="bzip2, gpgme, libgit2, libgpg-error, lua54, openssl, xz-utils"
 TERMUX_PKG_PROVIDES="lx"
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_HOSTBUILD=true
+TERMUX_PKG_EXCLUDED_ARCHES="arm, i686"
 
 termux_pkg_auto_update() {
 	# based on `termux_github_api_get_tag.sh`

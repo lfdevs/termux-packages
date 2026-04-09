@@ -2,10 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://www.thunderbird.net
 TERMUX_PKG_DESCRIPTION="Unofficial Thunderbird email client"
 TERMUX_PKG_LICENSE="MPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="147.0.1"
-TERMUX_PKG_REVISION=1
-TERMUX_PKG_SRCURL="https://archive.mozilla.org/pub/thunderbird/releases/${TERMUX_PKG_VERSION}/source/thunderbird-${TERMUX_PKG_VERSION}.source.tar.xz"
-TERMUX_PKG_SHA256=3e8a52c552a983340ced4c8f44ee37ae5028a2c9d717b9b49ee37ae72a6615ce
+TERMUX_PKG_VERSION="149.0.2"
+TERMUX_PKG_SRCURL="https://archive.mozilla.org/pub/thunderbird/releases/${TERMUX_PKG_VERSION#*really}/source/thunderbird-${TERMUX_PKG_VERSION#*really}.source.tar.xz"
+TERMUX_PKG_SHA256=b16192338ba16f89f933dcfaa55eccfe812f4bc6a7bc8b630b7b5d6ead28171e
 TERMUX_PKG_DEPENDS="botan3, ffmpeg, fontconfig, freetype, gdk-pixbuf, glib, gtk3, libandroid-shmem, libandroid-spawn, libc++, libcairo, libevent, libffi, libice, libicu, libjpeg-turbo, libnspr, libnss, libotr, libpixman, libsm, libvpx, libwebp, libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxrandr, libxtst, pango, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="libcpufeatures, libice, libsm"
 TERMUX_PKG_BUILD_IN_SRC=true
@@ -128,6 +127,14 @@ ac_add_options --enable-debug-symbols
 ac_add_options --disable-install-strip
 END
 	fi
+
+	_TERMUX_BOTAN_VERSION="$(
+		. "$TERMUX_SCRIPTDIR/packages/botan3/build.sh"
+		echo "$TERMUX_PKG_VERSION"
+	)"
+
+	echo "Applying patch: 1008-botan-version-detection.diff"
+	cat "$TERMUX_PKG_BUILDER_DIR/1008-botan-version-detection.diff" | sed "s/@TERMUX_BOTAN_VERSION@/$_TERMUX_BOTAN_VERSION/g" | patch -p1 -d "$TERMUX_PKG_SRCDIR/"
 
 	./mach configure
 }

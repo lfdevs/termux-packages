@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE='https://invent.kde.org/frameworks/ktextwidgets'
 TERMUX_PKG_DESCRIPTION='Advanced text editing widgets'
 TERMUX_PKG_LICENSE="LGPL-2.0, LGPL-3.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="6.22.0"
+TERMUX_PKG_VERSION="6.24.0"
 TERMUX_PKG_SRCURL="https://download.kde.org/stable/frameworks/${TERMUX_PKG_VERSION%.*}/ktextwidgets-${TERMUX_PKG_VERSION}.tar.xz"
-TERMUX_PKG_SHA256=e961094bc4ad4e51e88b7feac2e914b3813ee4171db940a517fb66917def5cf4
+TERMUX_PKG_SHA256=ba8f7d21014aabcdfa13e0cc1ff5a1db6c04761e080670caa76b7e4163086d15
 TERMUX_PKG_DEPENDS="kf6-kcolorscheme (>= ${TERMUX_PKG_VERSION%.*}), kf6-kcompletion (>= ${TERMUX_PKG_VERSION%.*}), kf6-kconfig (>= ${TERMUX_PKG_VERSION%.*}), kf6-kconfigwidgets (>= ${TERMUX_PKG_VERSION%.*}), kf6-ki18n (>= ${TERMUX_PKG_VERSION%.*}), kf6-kwidgetsaddons (>= ${TERMUX_PKG_VERSION%.*}), kf6-sonnet (>= ${TERMUX_PKG_VERSION%.*}), libc++, qt6-qtbase"
 TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${TERMUX_PKG_VERSION%.*}), qt6-qttools"
 TERMUX_PKG_AUTO_UPDATE=true

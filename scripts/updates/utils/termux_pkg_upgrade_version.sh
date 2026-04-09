@@ -23,9 +23,9 @@ termux_pkg_upgrade_version() {
 		EndUsage
 	fi
 
-	local LATEST_VERSION="$1"
-	local SKIP_VERSION_CHECK="${2:-}"
-	local EPOCH
+	local LATEST_VERSION SKIP_VERSION_CHECK EPOCH
+	LATEST_VERSION="$(sort -rV <<< "$1")" # Ensure its sorted in descending version order.
+	SKIP_VERSION_CHECK="${2:-}"
 	EPOCH="${TERMUX_PKG_VERSION%%:*}" # If there is no epoch, this will be the full version.
 	# Check if it isn't the full version and add ':'.
 	if [[ "${EPOCH}" != "${TERMUX_PKG_VERSION}" ]]; then
@@ -139,7 +139,7 @@ termux_pkg_upgrade_version() {
 
 	_termux_should_cleanup "${big_package}" && "${TERMUX_SCRIPTDIR}/scripts/run-docker.sh" ./clean.sh
 
-	if ! "${TERMUX_SCRIPTDIR}/scripts/run-docker.sh" ./build-package.sh -C -a "${TERMUX_ARCH}" -i "${TERMUX_PKG_NAME}"; then
+	if ! "${TERMUX_SCRIPTDIR}/scripts/run-docker.sh" -d ./build-package.sh -C -a "${TERMUX_ARCH}" -i "${TERMUX_PKG_NAME}"; then
 		_termux_should_cleanup "${big_package}" && "${TERMUX_SCRIPTDIR}/scripts/run-docker.sh" ./clean.sh
 		git checkout -- "${TERMUX_SCRIPTDIR}"
 		termux_error_exit "failed to build."

@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE="https://invent.kde.org/frameworks/kitemviews"
 TERMUX_PKG_DESCRIPTION="Set of item views extending the Qt model-view framework (KDE)"
 TERMUX_PKG_LICENSE="LGPL-2.1"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="6.22.0"
+TERMUX_PKG_VERSION="6.24.0"
 TERMUX_PKG_SRCURL="https://download.kde.org/stable/frameworks/${TERMUX_PKG_VERSION%.*}/kitemviews-${TERMUX_PKG_VERSION}.tar.xz"
-TERMUX_PKG_SHA256=9044204fcdeb60d5a327de18910e2467326f23b4fa837c30855abf358e30efdf
+TERMUX_PKG_SHA256=c7f38b01772782e7893e73115a3564083ce9fa9155e679b5be0647e6482182fa
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_DEPENDS="libc++, qt6-qtbase"
 TERMUX_PKG_BUILD_DEPENDS="extra-cmake-modules (>= ${TERMUX_PKG_VERSION%.*}), qt6-qttools"
