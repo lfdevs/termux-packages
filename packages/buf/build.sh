@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://buf.build
 TERMUX_PKG_DESCRIPTION="A new way of working with Protocol Buffers"
 TERMUX_PKG_LICENSE="Apache-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="1.67.0"
+TERMUX_PKG_VERSION="1.69.0"
 TERMUX_PKG_SRCURL=https://github.com/bufbuild/buf/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=f04bfbd2877aa4e256ab27ddafc9fda29bc9e4d0789c4110a28a38bd9576acc1
+TERMUX_PKG_SHA256=b5d662379d597a3010b9fde72d6102642d83b192b61138002a9a4a788e40806a
 TERMUX_PKG_AUTO_UPDATE=true
 
 termux_step_make() {
