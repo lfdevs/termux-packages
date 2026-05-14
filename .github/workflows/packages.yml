@@ -9,11 +9,6 @@ on:
     - 'packages/**'
     - 'root-packages/**'
     - 'x11-packages/**'
-  pull_request:
-    paths:
-    - 'packages/**'
-    - 'root-packages/**'
-    - 'x11-packages/**'
   workflow_dispatch:
     inputs:
       packages:

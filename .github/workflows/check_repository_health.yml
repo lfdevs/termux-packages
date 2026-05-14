@@ -1,8 +1,6 @@
 name: Check Repository Health
 
 on:
-  schedule:
-    - cron: "0 5 * * 0" # Runs at 05:00am UTC every Sunday
   workflow_dispatch:
 
 permissions: {} # none
