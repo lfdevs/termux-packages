@@ -3,10 +3,11 @@ TERMUX_PKG_DESCRIPTION="An open-source implementation of the OpenGL specificatio
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="docs/license.rst"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="26.0.6"
-TERMUX_PKG_SRCURL=https://archive.mesa3d.org/mesa-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=1d3c3b8a8363b8cc354175bb4a684ad8b035211cc1d6fa17aeb9b9623c513f89
-TERMUX_PKG_AUTO_UPDATE=true
+TERMUX_PKG_VERSION="26.2.0"
+TERMUX_PKG_SRCURL=git+https://gitlab.freedesktop.org/mesa/mesa
+TERMUX_PKG_GIT_BRANCH=main
+_COMMIT=e471e83a6581120214a67b91b5b5fa94ae7a5de1
+TERMUX_PKG_AUTO_UPDATE=false
 TERMUX_PKG_DEPENDS="libandroid-shmem, libc++, libdrm, libglvnd, libllvm (<< $TERMUX_LLVM_NEXT_MAJOR_VERSION), libwayland, libx11, libxext, libxfixes, libxshmfence, libxxf86vm, ncurses, vulkan-loader, zlib, zstd"
 TERMUX_PKG_SUGGESTS="mesa-dev"
 TERMUX_PKG_BUILD_DEPENDS="libclc, libwayland-protocols, libxrandr, llvm, llvm-tools, mlir, spirv-tools, xorgproto"
@@ -34,6 +35,14 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 "
 
 termux_step_post_get_source() {
+	if [ -n "${_COMMIT}" ]; then
+		# Ensure the requested commit is available when cloning shallow.
+		if git -C "$TERMUX_PKG_SRCDIR" rev-parse --is-shallow-repository | grep -q true; then
+			git -C "$TERMUX_PKG_SRCDIR" fetch --unshallow
+		fi
+		git -C "$TERMUX_PKG_SRCDIR" checkout "$_COMMIT"
+	fi
+
 	# Do not use meson wrap projects
 	rm -rf subprojects
 }
