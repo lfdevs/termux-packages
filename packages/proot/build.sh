@@ -3,17 +3,16 @@ TERMUX_PKG_HOMEPAGE=https://proot-me.github.io/
 TERMUX_PKG_DESCRIPTION="Emulate chroot, bind mount and binfmt_misc for non-root users"
 TERMUX_PKG_LICENSE="GPL-2.0"
 TERMUX_PKG_MAINTAINER="Michal Bednarski @michalbednarski"
-# Just bump commit and version when needed:
-_COMMIT=ee10b279a38d34b6704345bc448d18f019ca1b49
-TERMUX_PKG_VERSION=5.1.107
-TERMUX_PKG_REVISION=71
-TERMUX_PKG_SRCURL=https://github.com/termux/proot/archive/${_COMMIT}.zip
-TERMUX_PKG_SHA256=9f2cc32e60be6c2a09bade03f98e22bb27ccecda926c8a74979df03ae755b1dd
-TERMUX_PKG_AUTO_UPDATE=false
-TERMUX_PKG_DEPENDS="libtalloc"
+TERMUX_PKG_VERSION="5.1.107.78"
+TERMUX_PKG_REVISION=1
+TERMUX_PKG_SRCURL=https://github.com/termux/proot/archive/v${TERMUX_PKG_VERSION}.zip
+TERMUX_PKG_SHA256=7babd3fde0875adfff33936418886620c429cdd077d42db3af605d6bbe686d22
+TERMUX_PKG_AUTO_UPDATE=true
+TERMUX_PKG_UPDATE_TAG_TYPE="newest-tag"
+TERMUX_PKG_DEPENDS="libandroid-shmem, libtalloc"
 TERMUX_PKG_SUGGESTS="proot-distro"
 TERMUX_PKG_BUILD_IN_SRC=true
-TERMUX_PKG_EXTRA_MAKE_ARGS="-C src"
+TERMUX_PKG_EXTRA_MAKE_ARGS="-C src PROOT_WITH_LIBANDROID_SHMEM=true"
 
 # Install loader in libexec instead of extracting it every time
 export PROOT_UNBUNDLE_LOADER=$TERMUX_PREFIX/libexec/proot

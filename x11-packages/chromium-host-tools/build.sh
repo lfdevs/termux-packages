@@ -2,11 +2,10 @@ TERMUX_PKG_HOMEPAGE=https://www.chromium.org/Home
 TERMUX_PKG_DESCRIPTION="Chromium web browser (Host tools)"
 TERMUX_PKG_LICENSE="BSD 3-Clause"
 TERMUX_PKG_MAINTAINER="@licy183"
-TERMUX_PKG_VERSION="146.0.7680.177"
-TERMUX_PKG_REVISION=1
+TERMUX_PKG_VERSION="149.0.7827.114"
 TERMUX_PKG_SRCURL=https://commondatastorage.googleapis.com/chromium-browser-official/chromium-$TERMUX_PKG_VERSION-lite.tar.xz
-TERMUX_PKG_SHA256=e66465f7b26c91dfa06b31aba3c56f6e65edac6b227c6bd2edc04535ef8966cb
-TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libxkbcommon, libminizip, libnss, libx11, mesa, openssl, pango, pulseaudio, zlib"
+TERMUX_PKG_SHA256=6d31995447d1b505ce007cea67d5f66d10710e1660a1c304d0ae5c54aeca4eff
+TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libxkbcommon, libminizip, libnss, libx11, mesa, openssl, pango, pipewire, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="libffi-static"
 # TODO: Split chromium-common and chromium-headless
 # TERMUX_PKG_DEPENDS+=", chromium-common"
@@ -73,6 +72,14 @@ termux_step_post_get_source() {
 		echo "Applying patch: $(basename $f)"
 		patch -p1 --silent < "$f"
 	done
+
+	# Enable jumbo build for //components and //chrome
+	python \
+		"$TERMUX_PKG_BUILDER_DIR/scripts/rewrite_gn_jumbo.py" \
+		"$TERMUX_PKG_SRCDIR" \
+		--verbose \
+		--subdirs chrome \
+		--subdirs components
 
 	# Apply patches for jumbo build
 	local f
@@ -304,9 +311,6 @@ use_vaapi = false
 is_cfi = false
 use_cfi_icall = false
 use_thin_lto = false
-# OpenCL doesn't work out of box in Termux, use NNAPI instead
-build_tflite_with_opencl = false
-build_tflite_with_nnapi = true
 # Enable rust
 custom_target_rust_abi_target = \"$CARGO_TARGET_NAME\"
 clang_warning_suppression_file = \"\"
@@ -397,6 +401,7 @@ termux_step_make() {
 
 termux_step_make_install() {
 	cd $TERMUX_PKG_BUILDDIR
+	rm -rf $TERMUX_PREFIX/opt/$TERMUX_PKG_NAME
 	mkdir -p $TERMUX_PREFIX/opt/$TERMUX_PKG_NAME
 
 	local v8_tools=(
@@ -404,9 +409,10 @@ termux_step_make_install() {
 		torque                           # torque
 		bytecode_builtins_list_generator # generate_bytecode_builtins_list
 		gen-regexp-special-case          # v8:run_gen-regexp-special-case
+		icudtl.dat                       # icu data
 	)
 	mkdir -p "$TERMUX_PREFIX/opt/$TERMUX_PKG_NAME/$cr_v8_toolchain/"
-	cp "${v8_tools[@]/#/out/Release/$cr_v8_toolchain/}" "$TERMUX_PREFIX/opt/$TERMUX_PKG_NAME/$cr_v8_toolchain/"
+	cp -f "${v8_tools[@]/#/out/Release/$cr_v8_toolchain/}" "$TERMUX_PREFIX/opt/$TERMUX_PKG_NAME/$cr_v8_toolchain/"
 
 	local host_tools=(
 		make_top_domain_list_variables     # generate_top_domain_list_variables_file
@@ -418,7 +424,7 @@ termux_step_make_install() {
 		icudtl.dat                         # icu data
 	)
 	mkdir -p "$TERMUX_PREFIX/opt/$TERMUX_PKG_NAME/host/"
-	cp "${host_tools[@]/#/out/Release/host/}" "$TERMUX_PREFIX/opt/$TERMUX_PKG_NAME/host/"
+	cp -f "${host_tools[@]/#/out/Release/host/}" "$TERMUX_PREFIX/opt/$TERMUX_PKG_NAME/host/"
 
 	local normal_files=(
 		# v8 snapshot data

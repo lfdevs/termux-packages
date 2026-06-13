@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://github.com/bluenviron/mediamtx
 TERMUX_PKG_DESCRIPTION="Ready-to-use SRT / WebRTC / RTSP / RTMP / LL-HLS media server and media proxy"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="1.18.1"
+TERMUX_PKG_VERSION="1.19.1"
 TERMUX_PKG_SRCURL=https://github.com/bluenviron/mediamtx/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=69bcff6eec0fa85fbf8aa36d2e91c4df94b288e0957e0a03791312c26de6211f
+TERMUX_PKG_SHA256=eaf83d5a89946d90c4044e5b1882eb13f71554a03191e01ddedce7f9d5b63b5a
 TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_AUTO_UPDATE=true
 
