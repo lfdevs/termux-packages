@@ -3,10 +3,11 @@ TERMUX_PKG_DESCRIPTION="Wayland X11 server"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="@termux"
 TERMUX_PKG_VERSION="24.1.12"
+TERMUX_PKG_REVISION=2
 TERMUX_PKG_SRCURL=https://xorg.freedesktop.org/releases/individual/xserver/xwayland-${TERMUX_PKG_VERSION}.tar.xz
 TERMUX_PKG_SHA256=6df02c511b92c1b9848734d9d1b03a4c24f8375ba3cada44e9684a21b5f78e21
-TERMUX_PKG_AUTO_UPDATE=true
-TERMUX_PKG_DEPENDS="libandroid-shmem, libdrm, libepoxy, libpciaccess, libpixman, libwayland, libwayland-protocols, libx11, libxau, libxcvt, libxfont2, libxinerama, libxkbfile, libxshmfence, opengl, openssl, xkeyboard-config, xorg-protocol-txt, xorg-xkbcomp"
+TERMUX_PKG_AUTO_UPDATE=false
+TERMUX_PKG_DEPENDS="libandroid-shmem, libdrm, libepoxy, libpciaccess, libpixman, libwayland, libwayland-protocols, libx11, libxau, libxcvt, libxfont2, libxinerama, libxkbfile, libxshmfence, mesa, opengl, openssl, xkeyboard-config, xorg-protocol-txt, xorg-xkbcomp"
 TERMUX_PKG_BUILD_DEPENDS="libwayland-cross-scanner"
 
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
@@ -23,12 +24,15 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -Dxcsecurity=true
 -Dxf86bigfont=true
 -Ddrm=true
--Dglamor=false
+-Dglamor=true
 -Dxvfb=false
 -Dlibunwind=false
 -Dipv6=true
 -Dsha1=libcrypto
 -Ddefault_font_path=$TERMUX_PREFIX/share/fonts
+-Dxkb_dir=$TERMUX_PREFIX/share/xkeyboard-config-2
+-Dxkb_output_dir=$TERMUX_PREFIX/tmp
+-Dxkb_bin_dir=$TERMUX_PREFIX/bin
 "
 
 # Remove files conflicting with xorg-server:
