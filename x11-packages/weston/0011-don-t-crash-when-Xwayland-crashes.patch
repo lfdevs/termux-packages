@@ -1,0 +1,47 @@
+From 5b37b09c8a0659c4efda18b94f40ac91dc4923b3 Mon Sep 17 00:00:00 2001
+From: Derek Foreman <derek.foreman@collabora.com>
+Date: Fri, 1 Aug 2025 12:31:55 -0500
+Subject: [PATCH] xwm: Clean up windows so we don't crash when Xwayland crashes
+
+If Xwayland crashes when we have windows lying around, we can get a
+surface destroyed callback later that tries to log debug messages by
+dereferencing a stale pointer to the defunct window manager to find the
+log scope.
+
+Let's finish this FIXME from 2012, and wipe out the windows.
+
+Ref #1042
+
+Signed-off-by: Derek Foreman <derek.foreman@collabora.com>
+---
+ xwayland/window-manager.c | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/xwayland/window-manager.c b/xwayland/window-manager.c
+index 7a3be4d73..5783b7bdc 100644
+--- a/xwayland/window-manager.c
++++ b/xwayland/window-manager.c
+@@ -2970,11 +2970,19 @@ weston_wm_create(struct weston_xserver *wxs, int fd)
+ 	return wm;
+ }
+ 
++static void
++window_destroy(void *entry, void *data)
++{
++	struct weston_wm_window *window = entry;
++
++	weston_wm_window_destroy(window);
++}
++
+ void
+ weston_wm_destroy(struct weston_wm *wm)
+ {
+ 	wl_global_destroy(wm->xwayland_shell_global);
+-	/* FIXME: Free windows in hash. */
++	hash_table_for_each(wm->window_hash, window_destroy, NULL);
+ 	hash_table_destroy(wm->window_hash);
+ 	weston_wm_destroy_cursors(wm);
+ 	theme_destroy(wm->theme);
+-- 
+2.47.3
+
