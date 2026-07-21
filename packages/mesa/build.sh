@@ -3,19 +3,22 @@ TERMUX_PKG_DESCRIPTION="An open-source implementation of the OpenGL specificatio
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="docs/license.rst"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="26.3.1"
+TERMUX_PKG_VERSION="27.0.0"
+TERMUX_PKG_REVISION=99
 TERMUX_PKG_SRCURL=(
-	https://archive.mesa3d.org/mesa-${TERMUX_PKG_VERSION}.tar.xz
+	git+https://github.com/Goldzxcbug/mesa-for-android-container
 	https://gitlab.freedesktop.org/virgl/venus-protocol/-/archive/v1.1.3/venus-protocol-v1.1.3.tar.gz
 )
 TERMUX_PKG_SHA256=(
-	4e4e438eac7b840a9383988cbb7c08dad8041da544b9319fc26d319fa7348961
+	SKIP_CHECKSUM
 	c5a362ca28e0a35042db1baeadaf9183500b216841e49d72714b80bae50b4445
 )
-TERMUX_PKG_AUTO_UPDATE=true
+TERMUX_PKG_GIT_BRANCH=dev/adreno-main
+_COMMIT=881ade2e2c7e8ba051330af3b8ec10932a86009f
+TERMUX_PKG_AUTO_UPDATE=false
 TERMUX_PKG_DEPENDS="libandroid-shmem, libc++, libdrm, libglvnd, libllvm (<< $TERMUX_LLVM_NEXT_MAJOR_VERSION), libwayland, libx11, libxext, libxfixes, libxshmfence, libxxf86vm, ncurses, vulkan-loader, zlib, zstd"
 TERMUX_PKG_SUGGESTS="mesa-dev"
-TERMUX_PKG_BUILD_DEPENDS="libclc, libwayland-cross-scanner, libwayland-protocols, libxrandr, llvm, llvm-tools, mlir, spirv-tools, xorgproto"
+TERMUX_PKG_BUILD_DEPENDS="libclc, libva, libwayland-cross-scanner, libwayland-protocols, libxrandr, llvm, llvm-tools, mlir, spirv-tools, xorgproto"
 TERMUX_PKG_BREAKS="osmesa, osmesa-demos"
 TERMUX_PKG_CONFLICTS="libmesa, ndk-sysroot (<= 25b), osmesa"
 TERMUX_PKG_REPLACES="libmesa, osmesa"
@@ -34,11 +37,14 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -Dllvm=enabled
 -Dshared-llvm=enabled
 -Dplatforms=x11,wayland
--Dgallium-drivers=llvmpipe,softpipe,virgl,zink
 -Dgallium-rusticl=true
 -Dglvnd=enabled
 -Dxmlconfig=disabled
 -Dmesa-clc=system
+-Dgallium-va=enabled
+-Dtermux-va-bridge=enabled
+-Dtermux-va-wayland-shim=enabled
+-Dvideo-codecs=all
 "
 
 termux_step_host_build() {
@@ -143,6 +149,19 @@ termux_step_host_build() {
 }
 
 termux_step_post_get_source() {
+	if [ -n "${_COMMIT}" ]; then
+		# Ensure the requested commit is available when cloning shallow.
+		if git -C "$TERMUX_PKG_SRCDIR" rev-parse --is-shallow-repository | grep -q true; then
+			git -C "$TERMUX_PKG_SRCDIR" fetch --unshallow
+		fi
+		git -C "$TERMUX_PKG_SRCDIR" checkout "$_COMMIT"
+	fi
+
+	# Git sources do not process additional entries in TERMUX_PKG_SRCURL.
+	local venus_archive="$TERMUX_PKG_CACHEDIR/$(basename "${TERMUX_PKG_SRCURL[1]}")"
+	termux_download "${TERMUX_PKG_SRCURL[1]}" "$venus_archive" "${TERMUX_PKG_SHA256[1]}"
+	tar xf "$venus_archive" -C "$TERMUX_PKG_SRCDIR"
+
 	# Do not use meson wrap projects, except the bundled venus-protocol
 	mv subprojects/venus-protocol.wrap .
 	rm -rf subprojects
@@ -195,12 +214,15 @@ termux_step_pre_configure() {
 	export PATH="${_WRAPPER_BIN}:${CARGO_HOME}/bin:${HOSTBUILD_ROOTFS}/usr/bin:${PATH}"
 	export LD_LIBRARY_PATH="${HOSTBUILD_ROOTFS}/usr/lib/x86_64-linux-gnu"
 
-	local _vk_drivers="swrast,virtio"
+	local _vk_drivers="swrast"
+	local _opengl_drivers="llvmpipe,softpipe,virgl,zink"
 	if [ $TERMUX_ARCH = "arm" ] || [ $TERMUX_ARCH = "aarch64" ]; then
 		_vk_drivers+=",freedreno"
+		_opengl_drivers+=",freedreno"
 		TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -Dfreedreno-kmds=msm,kgsl"
 	fi
 	TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -Dvulkan-drivers=$_vk_drivers"
+	TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -Dgallium-drivers=$_opengl_drivers"
 }
 
 termux_step_post_configure() {
@@ -208,6 +230,24 @@ termux_step_post_configure() {
 }
 
 termux_step_post_make_install() {
+	# Avoid hard links
+	local f1
+	for f1 in $TERMUX_PREFIX/lib/dri/*; do
+		if [ ! -f "${f1}" ]; then
+			continue
+		fi
+		local f2
+		for f2 in $TERMUX_PREFIX/lib/dri/*; do
+			if [ -f "${f2}" ] && [ "${f1}" != "${f2}" ]; then
+				local s1=$(stat -c "%i" "${f1}")
+				local s2=$(stat -c "%i" "${f2}")
+				if [ "${s1}" = "${s2}" ]; then
+					ln -sfr "${f1}" "${f2}"
+				fi
+			fi
+		done
+	done
+
 	# Create symlinks
 	ln -sf libEGL_mesa.so "${TERMUX_PREFIX}/lib/libEGL_mesa.so.0"
 	ln -sf libGLX_mesa.so "${TERMUX_PREFIX}/lib/libGLX_mesa.so.0"
