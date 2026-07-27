@@ -1,0 +1,21 @@
+From faed788d80d5ebb5a4f6794e69fa603d55c4aa19 Mon Sep 17 00:00:00 2001
+From: Anmol Singh <162159622+Anmol6002@users.noreply.github.com>
+Date: Sun, 21 Jun 2026 17:32:50 +0530
+Subject: [PATCH] freedreno/common: enable Adreno 613
+
+---
+ src/freedreno/common/freedreno_devices.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+index c39470d0afb7..6d6603dd9957 100644
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -267,6 +267,7 @@
+         GPUId(608), # TODO: Test it, based only on libwrapfake dumps
+         GPUId(610),
+         GPUId(612), # TODO: Test it, based only on libwrapfake dumps
++        GPUId(613),
+     ], A6xxGPUInfo(
+         CHIP.A6XX,
+         [a6xx_base, a6xx_gen1_low],

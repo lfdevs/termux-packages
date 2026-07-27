@@ -3,17 +3,21 @@ TERMUX_PKG_DESCRIPTION="An open-source implementation of the OpenGL specificatio
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="docs/license.rst"
 TERMUX_PKG_MAINTAINER="@termux"
-TERMUX_PKG_VERSION="26.0.6"
-TERMUX_PKG_REVISION=1
-TERMUX_PKG_SRCURL=https://archive.mesa3d.org/mesa-${TERMUX_PKG_VERSION}.tar.xz
-TERMUX_PKG_SHA256=1d3c3b8a8363b8cc354175bb4a684ad8b035211cc1d6fa17aeb9b9623c513f89
-TERMUX_PKG_AUTO_UPDATE=true
+TERMUX_PKG_VERSION="26.2.0-devel"
+TERMUX_PKG_SRCURL=git+https://github.com/funnymdzz/mesa
+TERMUX_PKG_GIT_BRANCH=main
+_COMMIT=6a8f518cf31fd0a3c94f471730d0f6f08e02869d
+TERMUX_PKG_AUTO_UPDATE=false
 TERMUX_PKG_DEPENDS="libandroid-shmem, libc++, libdrm, libglvnd, libllvm (<< $TERMUX_LLVM_NEXT_MAJOR_VERSION), libwayland, libx11, libxext, libxfixes, libxshmfence, libxxf86vm, ncurses, vulkan-loader, zlib, zstd"
 TERMUX_PKG_SUGGESTS="mesa-dev"
-TERMUX_PKG_BUILD_DEPENDS="libclc, libwayland-protocols, libxrandr, llvm, llvm-tools, mlir, spirv-tools, xorgproto"
+TERMUX_PKG_BUILD_DEPENDS="clang, libclc, libwayland-protocols, libxrandr, llvm, llvm-tools, mlir, spirv-llvm-translator, spirv-tools, xorgproto"
 TERMUX_PKG_BREAKS="osmesa, osmesa-demos"
 TERMUX_PKG_CONFLICTS="libmesa, ndk-sysroot (<= 25b), osmesa"
 TERMUX_PKG_REPLACES="libmesa, osmesa"
+
+if [[ "${TERMUX_ARCH}" == "arm" || "${TERMUX_ARCH}" == "aarch64" ]]; then
+	TERMUX_PKG_HOSTBUILD=true
+fi
 
 # FIXME: Set `shared-llvm` to disabled if possible
 TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
@@ -35,8 +39,82 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 "
 
 termux_step_post_get_source() {
+	if [ -n "${_COMMIT}" ]; then
+		# Ensure the requested commit is available when cloning shallow.
+		if git -C "$TERMUX_PKG_SRCDIR" rev-parse --is-shallow-repository | grep -q true; then
+			git -C "$TERMUX_PKG_SRCDIR" fetch --unshallow
+		fi
+		git -C "$TERMUX_PKG_SRCDIR" checkout "$_COMMIT"
+	fi
+
 	# Do not use meson wrap projects
 	rm -rf subprojects
+}
+
+termux_step_host_build() {
+	(
+		export PATH="${TERMUX_HOST_LLVM_BASE_DIR}/bin:${PATH}"
+
+		AR=
+		CC=
+		CFLAGS=
+		CPPFLAGS=
+		CXX=
+		CXXFLAGS=
+		LD=
+		LDFLAGS=
+		PKG_CONFIG=
+		STRIP=
+		termux_setup_meson
+		unset AR CC CFLAGS CPPFLAGS CXX CXXFLAGS LD LDFLAGS \
+			PKG_CONFIG PKG_CONFIG_LIBDIR PKG_CONFIG_PATH STRIP
+
+		${TERMUX_MESON} setup \
+			"${TERMUX_PKG_HOSTBUILD_DIR}" \
+			"${TERMUX_PKG_SRCDIR}" \
+			--buildtype=release \
+			-Dbuild-tests=false \
+			-Ddisplay-info=disabled \
+			-Degl=disabled \
+			-Dgallium-drivers= \
+			-Dgbm=disabled \
+			-Dgles1=disabled \
+			-Dgles2=disabled \
+			-Dglx=disabled \
+			-Dinstall-mesa-clc=true \
+			-Dinstall-precomp-compiler=true \
+			-Dlibunwind=disabled \
+			-Dllvm=enabled \
+			-Dlmsensors=disabled \
+			-Dmesa-clc=enabled \
+			-Dopengl=false \
+			-Dplatforms= \
+			-Dprecomp-compiler=enabled \
+			-Dshared-glapi=disabled \
+			-Dtools=panfrost \
+			-Dvalgrind=disabled \
+			-Dvideo-codecs= \
+			-Dvulkan-drivers= \
+			-Dxmlconfig=disabled \
+			-Dzstd=disabled
+
+		ninja \
+			-C "${TERMUX_PKG_HOSTBUILD_DIR}" \
+			-j "${TERMUX_PKG_MAKE_PROCESSES}" \
+			src/compiler/clc/mesa_clc \
+			src/compiler/spirv/vtn_bindgen2 \
+			src/panfrost/clc/panfrost_compile
+
+		install -Dm755 \
+			"${TERMUX_PKG_HOSTBUILD_DIR}/src/compiler/clc/mesa_clc" \
+			"${TERMUX_PKG_HOSTBUILD_DIR}/bin/mesa_clc"
+		install -Dm755 \
+			"${TERMUX_PKG_HOSTBUILD_DIR}/src/compiler/spirv/vtn_bindgen2" \
+			"${TERMUX_PKG_HOSTBUILD_DIR}/bin/vtn_bindgen2"
+		install -Dm755 \
+			"${TERMUX_PKG_HOSTBUILD_DIR}/src/panfrost/clc/panfrost_compile" \
+			"${TERMUX_PKG_HOSTBUILD_DIR}/bin/panfrost_compile"
+	)
 }
 
 termux_step_pre_configure() {
@@ -77,8 +155,16 @@ termux_step_pre_configure() {
 
 	local _vk_drivers="swrast"
 	if [ $TERMUX_ARCH = "arm" ] || [ $TERMUX_ARCH = "aarch64" ]; then
-		_vk_drivers+=",freedreno"
-		TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -Dfreedreno-kmds=msm,kgsl"
+		_vk_drivers+=",freedreno,panfrost"
+		TERMUX_PKG_EXTRA_CONFIGURE_ARGS+="
+			-Dfreedreno-kmds=msm,kgsl
+			-Dpanfrost-kmds=kbase,panthor
+			-Dmesa-clc=system
+			-Dprecomp-compiler=system
+			-Dinstall-mesa-clc=false
+			-Dinstall-precomp-compiler=false
+		"
+		export PATH="${TERMUX_PKG_HOSTBUILD_DIR}/bin:${PATH}"
 	fi
 	TERMUX_PKG_EXTRA_CONFIGURE_ARGS+=" -Dvulkan-drivers=$_vk_drivers"
 }

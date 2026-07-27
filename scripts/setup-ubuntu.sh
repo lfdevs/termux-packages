@@ -331,6 +331,9 @@ PACKAGES+=" libzstd-dev"
 # Needed by wlroots
 PACKAGES+=" glslang-tools"
 
+# Needed by mesa host build
+PACKAGES+=" libdrm-dev spirv-tools-dev"
+
 # Do not require sudo if already running as root.
 SUDO="sudo"
 if [ "$(id -u)" = "0" ]; then
@@ -359,6 +362,10 @@ LLVM_PACKAGES=""
 LLVM_PACKAGES+=" llvm-${TERMUX_HOST_LLVM_MAJOR_VERSION}-dev"
 LLVM_PACKAGES+=" llvm-${TERMUX_HOST_LLVM_MAJOR_VERSION}-tools"
 LLVM_PACKAGES+=" clang-${TERMUX_HOST_LLVM_MAJOR_VERSION}"
+LLVM_PACKAGES+=" libclang-${TERMUX_HOST_LLVM_MAJOR_VERSION}-dev"
+LLVM_PACKAGES+=" libclang-cpp${TERMUX_HOST_LLVM_MAJOR_VERSION}-dev"
+LLVM_PACKAGES+=" libclc-${TERMUX_HOST_LLVM_MAJOR_VERSION}-dev"
+LLVM_PACKAGES+=" libllvmspirvlib-${TERMUX_HOST_LLVM_MAJOR_VERSION}-dev"
 LLVM_PACKAGES+=" lld-${TERMUX_HOST_LLVM_MAJOR_VERSION}"
 
 $SUDO apt-get -yq update
