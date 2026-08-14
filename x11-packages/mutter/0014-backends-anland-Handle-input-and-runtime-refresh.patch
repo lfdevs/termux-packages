@@ -1,0 +1,1190 @@
+From 646c02a6019e2497c9e7a40d953f5583fdca8c67 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 2 Aug 2026 21:22:09 +0800
+Subject: [PATCH 14/27] backends/anland: Handle input and runtime refresh
+
+Create persistent pointer, keyboard, and touchscreen virtual devices for the Anland data channel. Convert protocol evdev keys and buttons, scroll axes, and consumer motion into native Clutter input while preserving absolute and relative motion in one event.
+
+Batch touch updates into one input-thread task per protocol touch frame, expire incomplete batches safely, and release all pressed input state on fallback. Drain unimplemented variable payloads and resource fds so later protocol frames remain aligned.
+
+Reconnect consumer rendering after a valid runtime refresh change and wait for the virtual StageView to adopt the new refresh rate before reimporting buffers.
+
+Extend the mock transport test with pointer-motion and display-refresh wire framing.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0005-backends-anland-Handle-input-and-runtime-refresh.patch
+
+diff --git a/src/backends/anland/meta-anland-input.c b/src/backends/anland/meta-anland-input.c
+new file mode 100644
+index 0000000000..2d0c1b66d2
+--- /dev/null
++++ b/src/backends/anland/meta-anland-input.c
+@@ -0,0 +1,516 @@
++/* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
++
++#include "config.h"
++
++#include "backends/anland/meta-anland-input.h"
++
++#include "backends/meta-backend-private.h"
++#include "backends/native/meta-virtual-input-device-native.h"
++
++#include <linux/input.h>
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#define ANLAND_MAX_RESOURCE_FDS 64
++#define ANLAND_MAX_TOUCH_BATCH_EVENTS 128
++#define ANLAND_TOUCH_BATCH_TIMEOUT_MS 100
++
++struct _MetaAnlandInput
++{
++  ClutterVirtualInputDevice *pointer;
++  ClutterVirtualInputDevice *keyboard;
++  ClutterVirtualInputDevice *touchscreen;
++  gboolean pressed_keys[KEY_CNT];
++  gboolean pressed_buttons[KEY_CNT];
++  GHashTable *touch_slots;
++  gboolean active_touch_slots[CLUTTER_VIRTUAL_INPUT_DEVICE_MAX_TOUCH_SLOTS];
++  GArray *touch_batch;
++  guint touch_batch_timeout_id;
++
++  MetaAnlandInputRefreshFunc refresh_func;
++  gpointer refresh_user_data;
++};
++
++static gboolean
++is_finite_pair (float x,
++                float y)
++{
++  return isfinite (x) && isfinite (y);
++}
++
++static void
++clear_touch_slot (MetaAnlandInput *input,
++                  int              slot)
++{
++  GHashTableIter iter;
++  gpointer key;
++  gpointer value;
++
++  g_hash_table_iter_init (&iter, input->touch_slots);
++  while (g_hash_table_iter_next (&iter, &key, &value))
++    {
++      if (GPOINTER_TO_UINT (value) == (guint) slot + 1)
++        {
++          g_hash_table_iter_remove (&iter);
++          break;
++        }
++    }
++  input->active_touch_slots[slot] = FALSE;
++}
++
++static void
++cancel_touches (MetaAnlandInput *input)
++{
++  MetaVirtualTouchEvent events[CLUTTER_VIRTUAL_INPUT_DEVICE_MAX_TOUCH_SLOTS];
++  guint n_events = 0;
++  guint slot;
++
++  if (!input->touchscreen)
++    return;
++
++  for (slot = 0; slot < G_N_ELEMENTS (input->active_touch_slots); slot++)
++    {
++      if (!input->active_touch_slots[slot])
++        continue;
++
++      events[n_events++] = (MetaVirtualTouchEvent) {
++        .type = META_VIRTUAL_TOUCH_EVENT_CANCEL,
++        .slot = slot,
++      };
++    }
++
++  if (n_events > 0)
++    meta_virtual_input_device_native_notify_touch_events (
++      META_VIRTUAL_INPUT_DEVICE_NATIVE (input->touchscreen),
++      g_get_monotonic_time (), events, n_events);
++
++  if (input->touch_slots)
++    g_hash_table_remove_all (input->touch_slots);
++  memset (input->active_touch_slots, 0, sizeof (input->active_touch_slots));
++}
++
++static gboolean
++touch_batch_timeout_cb (gpointer user_data)
++{
++  MetaAnlandInput *input = user_data;
++
++  input->touch_batch_timeout_id = 0;
++  if (input->touch_batch->len > 0)
++    {
++      g_warning ("Anland input dropped an incomplete touch frame");
++      cancel_touches (input);
++      g_array_set_size (input->touch_batch, 0);
++    }
++
++  return G_SOURCE_REMOVE;
++}
++
++static void
++schedule_touch_batch_timeout (MetaAnlandInput *input)
++{
++  if (!input->touch_batch_timeout_id)
++    input->touch_batch_timeout_id =
++      g_timeout_add (ANLAND_TOUCH_BATCH_TIMEOUT_MS,
++                     touch_batch_timeout_cb, input);
++}
++
++static int
++allocate_touch_slot (MetaAnlandInput *input)
++{
++  guint slot;
++
++  for (slot = 0; slot < G_N_ELEMENTS (input->active_touch_slots); slot++)
++    {
++      if (!input->active_touch_slots[slot])
++        return slot;
++    }
++
++  return -1;
++}
++
++static void
++flush_touch_batch (MetaAnlandInput *input)
++{
++  guint i;
++
++  if (input->touch_batch_timeout_id)
++    {
++      g_source_remove (input->touch_batch_timeout_id);
++      input->touch_batch_timeout_id = 0;
++    }
++
++  if (input->touch_batch->len == 0)
++    return;
++
++  meta_virtual_input_device_native_notify_touch_events (
++    META_VIRTUAL_INPUT_DEVICE_NATIVE (input->touchscreen),
++    g_get_monotonic_time (), (const MetaVirtualTouchEvent *) input->touch_batch->data,
++    input->touch_batch->len);
++
++  for (i = 0; i < input->touch_batch->len; i++)
++    {
++      const MetaVirtualTouchEvent *event =
++        &g_array_index (input->touch_batch, MetaVirtualTouchEvent, i);
++
++      if (event->type == META_VIRTUAL_TOUCH_EVENT_UP)
++        clear_touch_slot (input, event->slot);
++    }
++  g_array_set_size (input->touch_batch, 0);
++}
++
++static gboolean
++drain_payload (MetaAnlandTransport *transport,
++               uint32_t             size)
++{
++  uint8_t buffer[4096];
++
++  if (size > META_ANLAND_MAX_PAYLOAD_SIZE)
++    return FALSE;
++
++  while (size > 0)
++    {
++      size_t chunk = MIN ((size_t) size, sizeof (buffer));
++
++      if (meta_anland_transport_read_input_payload (transport, buffer, chunk,
++                                                     100) != 1)
++        return FALSE;
++      size -= (uint32_t) chunk;
++    }
++
++  return TRUE;
++}
++
++static gboolean
++discard_resource_fds (MetaAnlandTransport *transport,
++                      uint32_t             expected_fds)
++{
++  int fds[ANLAND_MAX_RESOURCE_FDS];
++  int n_fds = 0;
++  int i;
++
++  if (expected_fds == 0)
++    return TRUE;
++  if (expected_fds > G_N_ELEMENTS (fds) ||
++      meta_anland_transport_read_input_fds (transport, fds,
++                                            G_N_ELEMENTS (fds), &n_fds, 100) != 1)
++    return FALSE;
++
++  for (i = 0; i < n_fds; i++)
++    close (fds[i]);
++
++  return n_fds == (int) expected_fds;
++}
++
++static void
++handle_pointer_motion (MetaAnlandInput         *input,
++                       const struct InputEvent *event)
++{
++  if (!is_finite_pair (event->pointer_motion.x, event->pointer_motion.y) ||
++      !is_finite_pair (event->pointer_motion.dx, event->pointer_motion.dy))
++    return;
++
++  meta_virtual_input_device_native_notify_absolute_relative_motion (
++    META_VIRTUAL_INPUT_DEVICE_NATIVE (input->pointer), g_get_monotonic_time (),
++    event->pointer_motion.x, event->pointer_motion.y,
++    event->pointer_motion.dx, event->pointer_motion.dy);
++}
++
++static void
++handle_pointer_button (MetaAnlandInput         *input,
++                       const struct InputEvent *event)
++{
++  uint32_t button = event->pointer_button.button;
++  gboolean pressed = event->pointer_button.pressed != 0;
++
++  if (button >= KEY_CNT || button < BTN_LEFT || button > BTN_GEAR_UP ||
++      input->pressed_buttons[button] == pressed)
++    return;
++
++  input->pressed_buttons[button] = pressed;
++  clutter_virtual_input_device_notify_button (
++    input->pointer, g_get_monotonic_time (), meta_evdev_button_to_clutter (button),
++    pressed ? CLUTTER_BUTTON_STATE_PRESSED : CLUTTER_BUTTON_STATE_RELEASED);
++}
++
++static void
++handle_pointer_axis (MetaAnlandInput         *input,
++                     const struct InputEvent *event)
++{
++  ClutterScrollDirection direction;
++  double dx = 0.0;
++  double dy = 0.0;
++  int64_t discrete = event->pointer_axis.discrete;
++  int steps;
++
++  if (!isfinite (event->pointer_axis.value))
++    return;
++
++  switch (event->pointer_axis.axis)
++    {
++    case 0:
++      dy = event->pointer_axis.value;
++      direction = discrete >= 0 ? CLUTTER_SCROLL_DOWN : CLUTTER_SCROLL_UP;
++      break;
++    case 1:
++      dx = event->pointer_axis.value;
++      direction = discrete >= 0 ? CLUTTER_SCROLL_RIGHT : CLUTTER_SCROLL_LEFT;
++      break;
++    default:
++      g_warning ("Anland input ignored invalid scroll axis %u",
++                 event->pointer_axis.axis);
++      return;
++    }
++
++  if (dx != 0.0 || dy != 0.0)
++    clutter_virtual_input_device_notify_scroll_continuous (
++      input->pointer, g_get_monotonic_time (), dx, dy,
++      CLUTTER_SCROLL_SOURCE_WHEEL, CLUTTER_SCROLL_FINISHED_NONE);
++
++  steps = MIN (llabs (discrete), 120);
++  while (steps-- > 0)
++    clutter_virtual_input_device_notify_discrete_scroll (
++      input->pointer, g_get_monotonic_time (), direction,
++      CLUTTER_SCROLL_SOURCE_WHEEL);
++}
++
++static void
++handle_key (MetaAnlandInput         *input,
++            const struct InputEvent *event)
++{
++  uint32_t keycode = event->key.keycode;
++  gboolean pressed;
++
++  if (keycode >= KEY_CNT ||
++      (event->key.action != INPUT_ACTION_DOWN &&
++       event->key.action != INPUT_ACTION_UP))
++    return;
++
++  pressed = event->key.action == INPUT_ACTION_DOWN;
++  if (input->pressed_keys[keycode] == pressed)
++    return;
++
++  input->pressed_keys[keycode] = pressed;
++  clutter_virtual_input_device_notify_key (
++    input->keyboard, g_get_monotonic_time (), keycode,
++    pressed ? CLUTTER_KEY_STATE_PRESSED : CLUTTER_KEY_STATE_RELEASED);
++}
++
++static void
++handle_touch (MetaAnlandInput         *input,
++              const struct InputEvent *event)
++{
++  gpointer value;
++  int slot;
++  MetaVirtualTouchEvent touch_event;
++
++  if ((event->touch.action == INPUT_ACTION_DOWN ||
++       event->touch.action == INPUT_ACTION_MOVE) &&
++      !is_finite_pair (event->touch.x, event->touch.y))
++    return;
++
++  value = g_hash_table_lookup (input->touch_slots,
++                               GINT_TO_POINTER (event->touch.pointer_id));
++  switch (event->touch.action)
++    {
++    case INPUT_ACTION_DOWN:
++      if (value)
++        return;
++
++      slot = allocate_touch_slot (input);
++      if (slot < 0)
++        {
++          g_warning ("Anland input ran out of touch slots");
++          return;
++        }
++      input->active_touch_slots[slot] = TRUE;
++      g_hash_table_insert (input->touch_slots,
++                           GINT_TO_POINTER (event->touch.pointer_id),
++                           GUINT_TO_POINTER (slot + 1));
++      touch_event = (MetaVirtualTouchEvent) {
++        .type = META_VIRTUAL_TOUCH_EVENT_DOWN,
++        .slot = slot,
++        .x = event->touch.x,
++        .y = event->touch.y,
++      };
++      break;
++    case INPUT_ACTION_MOVE:
++      if (!value)
++        return;
++      touch_event = (MetaVirtualTouchEvent) {
++        .type = META_VIRTUAL_TOUCH_EVENT_MOTION,
++        .slot = GPOINTER_TO_UINT (value) - 1,
++        .x = event->touch.x,
++        .y = event->touch.y,
++      };
++      break;
++    case INPUT_ACTION_UP:
++      if (!value)
++        return;
++      touch_event = (MetaVirtualTouchEvent) {
++        .type = META_VIRTUAL_TOUCH_EVENT_UP,
++        .slot = GPOINTER_TO_UINT (value) - 1,
++      };
++      break;
++    default:
++      return;
++    }
++
++  if (input->touch_batch->len >= ANLAND_MAX_TOUCH_BATCH_EVENTS)
++    {
++      g_warning ("Anland input dropped an oversized touch frame");
++      cancel_touches (input);
++      g_array_set_size (input->touch_batch, 0);
++      return;
++    }
++
++  g_array_append_val (input->touch_batch, touch_event);
++  schedule_touch_batch_timeout (input);
++}
++
++MetaAnlandInput *
++meta_anland_input_new (MetaBackend               *backend,
++                       MetaAnlandInputRefreshFunc  refresh_func,
++                       gpointer                    user_data,
++                       GError                    **error)
++{
++  MetaAnlandInput *input;
++  ClutterSeat *seat;
++
++  seat = meta_backend_get_default_seat (backend);
++  if (!seat)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "Anland backend has no default input seat");
++      return NULL;
++    }
++
++  input = g_new0 (MetaAnlandInput, 1);
++  input->touch_slots = g_hash_table_new (g_direct_hash, g_direct_equal);
++  input->touch_batch = g_array_new (FALSE, FALSE, sizeof (MetaVirtualTouchEvent));
++  input->pointer = clutter_seat_create_virtual_device (seat,
++                                                        CLUTTER_POINTER_DEVICE);
++  input->keyboard = clutter_seat_create_virtual_device (seat,
++                                                         CLUTTER_KEYBOARD_DEVICE);
++  input->touchscreen = clutter_seat_create_virtual_device (seat,
++                                                            CLUTTER_TOUCHSCREEN_DEVICE);
++  if (!input->pointer || !input->keyboard || !input->touchscreen)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "Failed to create Anland virtual input devices");
++      meta_anland_input_free (input);
++      return NULL;
++    }
++
++  input->refresh_func = refresh_func;
++  input->refresh_user_data = user_data;
++  return input;
++}
++
++void
++meta_anland_input_free (MetaAnlandInput *input)
++{
++  if (!input)
++    return;
++
++  if (input->touch_batch_timeout_id)
++    {
++      g_source_remove (input->touch_batch_timeout_id);
++      input->touch_batch_timeout_id = 0;
++    }
++  meta_anland_input_reset (input);
++  g_clear_object (&input->pointer);
++  g_clear_object (&input->keyboard);
++  g_clear_object (&input->touchscreen);
++  g_clear_pointer (&input->touch_slots, g_hash_table_unref);
++  g_clear_pointer (&input->touch_batch, g_array_unref);
++  g_free (input);
++}
++
++gboolean
++meta_anland_input_handle_event (MetaAnlandInput         *input,
++                                MetaAnlandTransport     *transport,
++                                const struct InputEvent *event)
++{
++  switch (event->type)
++    {
++    case INPUT_TYPE_POINTER_MOTION:
++      handle_pointer_motion (input, event);
++      break;
++    case INPUT_TYPE_POINTER_BUTTON:
++      handle_pointer_button (input, event);
++      break;
++    case INPUT_TYPE_POINTER_AXIS:
++      handle_pointer_axis (input, event);
++      break;
++    case INPUT_TYPE_KEY:
++      handle_key (input, event);
++      break;
++    case INPUT_TYPE_TOUCH:
++      handle_touch (input, event);
++      break;
++    case INPUT_TYPE_TOUCH_FRAME:
++      flush_touch_batch (input);
++      break;
++    case INPUT_TYPE_DISPLAY_REFRESH:
++      if (event->display.refresh_mhz >= 1000 &&
++          event->display.refresh_mhz <= 1000000 && input->refresh_func)
++        input->refresh_func (event->display.refresh_mhz,
++                             input->refresh_user_data);
++      break;
++    case INPUT_TYPE_CLIPBOARD:
++      return drain_payload (transport, event->clipboard.size);
++    case INPUT_TYPE_TEXT_INPUT:
++      return drain_payload (transport, event->text_input.size);
++    case INPUT_TYPE_RESOURCE:
++      return discard_resource_fds (transport, event->resource.fdnum);
++    case INPUT_TYPE_ACTION:
++      break;
++    default:
++      g_warning ("Anland input ignored unknown event type %u", event->type);
++      break;
++    }
++
++  return TRUE;
++}
++
++void
++meta_anland_input_reset (MetaAnlandInput *input)
++{
++  guint code;
++
++  if (!input)
++    return;
++
++  if (input->touch_batch_timeout_id)
++    {
++      g_source_remove (input->touch_batch_timeout_id);
++      input->touch_batch_timeout_id = 0;
++    }
++
++  for (code = 0; code < G_N_ELEMENTS (input->pressed_keys); code++)
++    {
++      if (!input->pressed_keys[code])
++        continue;
++
++      clutter_virtual_input_device_notify_key (
++        input->keyboard, g_get_monotonic_time (), code,
++        CLUTTER_KEY_STATE_RELEASED);
++      input->pressed_keys[code] = FALSE;
++    }
++
++  for (code = BTN_LEFT; code < G_N_ELEMENTS (input->pressed_buttons); code++)
++    {
++      if (!input->pressed_buttons[code])
++        continue;
++
++      clutter_virtual_input_device_notify_button (
++        input->pointer, g_get_monotonic_time (),
++        meta_evdev_button_to_clutter (code), CLUTTER_BUTTON_STATE_RELEASED);
++      input->pressed_buttons[code] = FALSE;
++    }
++
++  cancel_touches (input);
++  g_array_set_size (input->touch_batch, 0);
++}
+diff --git a/src/backends/anland/meta-anland-input.h b/src/backends/anland/meta-anland-input.h
+new file mode 100644
+index 0000000000..783e54736e
+--- /dev/null
++++ b/src/backends/anland/meta-anland-input.h
+@@ -0,0 +1,24 @@
++/* -*- mode: C; c-file-style: "gnu"; indent-tabs-mode: nil; -*- */
++
++#pragma once
++
++#include <glib.h>
++
++#include "backends/anland/vendor/meta-anland-transport.h"
++#include "backends/meta-backend-types.h"
++
++typedef struct _MetaAnlandInput MetaAnlandInput;
++
++typedef void (* MetaAnlandInputRefreshFunc) (uint32_t refresh_mhz,
++                                              gpointer user_data);
++
++MetaAnlandInput * meta_anland_input_new (MetaBackend                *backend,
++                                         MetaAnlandInputRefreshFunc   refresh_func,
++                                         gpointer                     user_data,
++                                         GError                     **error);
++void meta_anland_input_free (MetaAnlandInput *input);
++
++gboolean meta_anland_input_handle_event (MetaAnlandInput          *input,
++                                         MetaAnlandTransport      *transport,
++                                         const struct InputEvent  *event);
++void meta_anland_input_reset (MetaAnlandInput *input);
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index 3f491b1768..59b5b988a3 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -4,6 +4,7 @@
+ 
+ #include "backends/anland/meta-backend-anland.h"
+ 
++#include "backends/anland/meta-anland-input.h"
+ #include "backends/anland/vendor/meta-anland-transport.h"
+ #include "backends/meta-backend-private.h"
+ #include "backends/meta-fd-source.h"
+@@ -17,6 +18,7 @@
+ 
+ #include <drm_fourcc.h>
+ #include <fcntl.h>
++#include <math.h>
+ #include <sys/eventfd.h>
+ #include <sys/stat.h>
+ #include <unistd.h>
+@@ -40,8 +42,10 @@ struct _MetaBackendAnland
+   MetaVirtualMonitor *virtual_monitor;
+   struct screen_info screen_info;
+   guint reconnect_source_id;
++  MetaAnlandInput *input;
+ 
+   GSource *buffer_ready_source;
++  GSource *input_source;
+   MetaStageView *stage_view;
+   CoglFramebuffer *placeholder_framebuffer;
+   CoglFramebuffer *buffer_framebuffers[MAX_BUFS];
+@@ -58,6 +62,7 @@ struct _MetaBackendAnland
+ G_DEFINE_TYPE (MetaBackendAnland, meta_backend_anland, META_TYPE_BACKEND_NATIVE)
+ 
+ static void deactivate_consumer (MetaBackendAnland *backend);
++static void schedule_reconnect (MetaBackendAnland *backend);
+ 
+ static char *
+ get_default_socket_path (void)
+@@ -306,6 +311,15 @@ complete_pending_frame (MetaBackendAnland *backend)
+ static void
+ deactivate_consumer (MetaBackendAnland *backend)
+ {
++  if (backend->input_source)
++    {
++      g_source_destroy (backend->input_source);
++      g_clear_pointer (&backend->input_source, g_source_unref);
++    }
++
++  if (backend->input)
++    meta_anland_input_reset (backend->input);
++
+   if (backend->buffer_ready_source)
+     {
+       g_source_destroy (backend->buffer_ready_source);
+@@ -384,6 +398,40 @@ on_stage_view_present (ClutterStageView *stage_view,
+   return TRUE;
+ }
+ 
++static gboolean
++input_source_prepare (gpointer user_data)
++{
++  return FALSE;
++}
++
++static gboolean
++input_source_dispatch (gpointer user_data)
++{
++  MetaBackendAnland *backend = META_BACKEND_ANLAND (user_data);
++  struct InputEvent event;
++  int result;
++
++  if (!backend->consumer_active || !backend->transport || !backend->input ||
++      meta_anland_transport_is_fallback (backend->transport))
++    return G_SOURCE_REMOVE;
++
++  while ((result = meta_anland_transport_poll_input_event (
++             backend->transport, &event, 0)) > 0)
++    {
++      if (!meta_anland_input_handle_event (backend->input,
++                                           backend->transport, &event))
++        {
++          meta_anland_transport_enter_fallback (backend->transport);
++          return G_SOURCE_REMOVE;
++        }
++
++      if (!backend->consumer_active)
++        return G_SOURCE_REMOVE;
++    }
++
++  return result < 0 ? G_SOURCE_REMOVE : G_SOURCE_CONTINUE;
++}
++
+ static gboolean
+ buffer_ready_source_prepare (gpointer user_data)
+ {
+@@ -444,7 +492,9 @@ activate_consumer (MetaBackendAnland *backend)
+   struct buf_info buffer_info;
+   int n_buffers;
+   int buffer_ready_fd;
+-  int source_fd;
++  int buffer_ready_source_fd = -1;
++  int input_fd;
++  int input_source_fd = -1;
+   int i;
+   g_autoptr (GError) error = NULL;
+ 
+@@ -474,6 +524,12 @@ activate_consumer (MetaBackendAnland *backend)
+         (int) buffer_info.height)
+     return FALSE;
+ 
++  if (backend->screen_info.refresh > 0 &&
++      fabsf (clutter_stage_view_get_refresh_rate (
++               CLUTTER_STAGE_VIEW (backend->stage_view)) -
++             backend->screen_info.refresh / 1000.0f) > 0.01f)
++    return FALSE;
++
+   for (i = 0; i < n_buffers; i++)
+     {
+       int fd;
+@@ -500,14 +556,23 @@ activate_consumer (MetaBackendAnland *backend)
+     }
+ 
+   buffer_ready_fd = meta_anland_transport_get_buffer_ready_fd (backend->transport);
+-  source_fd = fcntl (buffer_ready_fd, F_DUPFD_CLOEXEC, 3);
+-  if (source_fd < 0)
++  buffer_ready_source_fd = fcntl (buffer_ready_fd, F_DUPFD_CLOEXEC, 3);
++  if (buffer_ready_source_fd < 0)
+     {
+       g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
+                    "Failed to duplicate Anland buffer-ready eventfd");
+       goto failed;
+     }
+ 
++  input_fd = meta_anland_transport_get_data_fd (backend->transport);
++  input_source_fd = fcntl (input_fd, F_DUPFD_CLOEXEC, 3);
++  if (input_source_fd < 0)
++    {
++      g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
++                   "Failed to duplicate Anland data fd");
++      goto failed;
++    }
++
+   for (i = 0; i < n_buffers; i++)
+     backend->buffer_framebuffers[i] = framebuffers[i];
+   backend->consumer_active = TRUE;
+@@ -516,9 +581,13 @@ activate_consumer (MetaBackendAnland *backend)
+   clutter_stage_view_set_present_func (CLUTTER_STAGE_VIEW (backend->stage_view),
+                                        on_stage_view_present, backend);
+   backend->buffer_ready_source = meta_create_fd_source (
+-    source_fd, "[mutter] Anland buffer ready",
++    buffer_ready_source_fd, "[mutter] Anland buffer ready",
+     buffer_ready_source_prepare, buffer_ready_source_dispatch, backend, NULL);
+   g_source_attach (backend->buffer_ready_source, NULL);
++  backend->input_source = meta_create_fd_source (
++    input_source_fd, "[mutter] Anland input",
++    input_source_prepare, input_source_dispatch, backend, NULL);
++  g_source_attach (backend->input_source, NULL);
+   return TRUE;
+ 
+ failed:
+@@ -526,6 +595,10 @@ failed:
+              error ? error->message : "invalid transport state");
+   for (i = 0; i < MAX_BUFS; i++)
+     g_clear_object (&framebuffers[i]);
++  if (buffer_ready_source_fd >= 0)
++    close (buffer_ready_source_fd);
++  if (input_source_fd >= 0)
++    close (input_source_fd);
+   return FALSE;
+ }
+ 
+@@ -550,6 +623,26 @@ on_transport_fallback (void *user_data)
+   schedule_reconnect (backend);
+ }
+ 
++static void
++on_input_display_refresh (uint32_t refresh_mhz,
++                          gpointer user_data)
++{
++  MetaBackendAnland *backend = META_BACKEND_ANLAND (user_data);
++
++  if (backend->screen_info.refresh == refresh_mhz)
++    return;
++
++  backend->screen_info.refresh = refresh_mhz;
++  deactivate_consumer (backend);
++  if (!update_virtual_monitor (backend, NULL))
++    {
++      clear_transport (backend);
++      return;
++    }
++
++  schedule_reconnect (backend);
++}
++
+ static gboolean
+ reconnect_cb (gpointer user_data)
+ {
+@@ -600,6 +693,11 @@ meta_backend_anland_init_post (MetaBackend  *backend,
+   if (!parent_class->init_post (backend, error))
+     return FALSE;
+ 
++  backend_anland->input = meta_anland_input_new (
++    backend, on_input_display_refresh, backend_anland, error);
++  if (!backend_anland->input)
++    return FALSE;
++
+   if (!connect_transport (backend_anland, error))
+     return FALSE;
+ 
+@@ -643,6 +741,7 @@ meta_backend_anland_dispose (GObject *object)
+   g_clear_handle_id (&backend->reconnect_source_id, g_source_remove);
+   clear_transport (backend);
+   uninhibit_frame_clock (backend);
++  g_clear_pointer (&backend->input, meta_anland_input_free);
+   g_clear_object (&backend->placeholder_framebuffer);
+   g_clear_object (&backend->stage_view);
+   g_clear_object (&backend->virtual_monitor);
+diff --git a/src/backends/native/meta-seat-impl.c b/src/backends/native/meta-seat-impl.c
+index 0a6aae3cf0..68e2b0468f 100644
+--- a/src/backends/native/meta-seat-impl.c
++++ b/src/backends/native/meta-seat-impl.c
+@@ -976,6 +976,66 @@ meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_impl,
+   queue_event (seat_impl, event);
+ }
+ 
++void
++meta_seat_impl_notify_absolute_relative_motion_in_impl (MetaSeatImpl       *seat_impl,
++                                                        ClutterInputDevice *input_device,
++                                                        uint64_t            time_us,
++                                                        float               x,
++                                                        float               y,
++                                                        float               dx,
++                                                        float               dy,
++                                                        float               dx_unaccel,
++                                                        float               dy_unaccel,
++                                                        double             *axes)
++{
++  MetaInputDeviceNative *device_native =
++    META_INPUT_DEVICE_NATIVE (input_device);
++  ClutterModifierType modifiers;
++  ClutterEvent *event;
++  float cur_x, cur_y;
++  float dx_constrained, dy_constrained;
++
++  if (clutter_input_device_get_device_type (input_device) == CLUTTER_TABLET_DEVICE)
++    {
++      meta_input_device_native_get_coords_in_impl (device_native, &cur_x, &cur_y);
++      modifiers = device_native->button_state;
++    }
++  else
++    {
++      meta_input_device_native_get_coords_in_impl (
++        META_INPUT_DEVICE_NATIVE (seat_impl->core_pointer), &cur_x, &cur_y);
++      modifiers = seat_impl->button_state;
++    }
++
++  constrain_coordinates (seat_impl, input_device, time_us, x, y, &x, &y);
++  dx_constrained = x - cur_x;
++  dy_constrained = y - cur_y;
++  update_device_coords_in_impl (seat_impl, input_device,
++                                GRAPHENE_POINT_INIT (x, y));
++
++  modifiers |= xkb_state_serialize_mods (seat_impl->xkb, XKB_STATE_MODS_EFFECTIVE);
++
++  g_signal_emit (seat_impl, signals[POINTER_POSITION_CHANGED_IN_IMPL], 0,
++                 &GRAPHENE_POINT_INIT (seat_impl->pointer_x,
++                                       seat_impl->pointer_y));
++
++  event =
++    clutter_event_motion_new (CLUTTER_EVENT_FLAG_RELATIVE_MOTION,
++                              time_us,
++                              input_device,
++                              device_native->last_tool,
++                              modifiers,
++                              GRAPHENE_POINT_INIT (x, y),
++                              GRAPHENE_POINT_INIT (dx, dy),
++                              GRAPHENE_POINT_INIT (dx_unaccel,
++                                                   dy_unaccel),
++                              GRAPHENE_POINT_INIT (dx_constrained,
++                                                   dy_constrained),
++                              axes);
++
++  queue_event (seat_impl, event);
++}
++
+ void
+ meta_seat_impl_notify_button_in_impl (MetaSeatImpl       *seat_impl,
+                                       ClutterInputDevice *input_device,
+diff --git a/src/backends/native/meta-seat-impl.h b/src/backends/native/meta-seat-impl.h
+index 24d0405062..a995244f31 100644
+--- a/src/backends/native/meta-seat-impl.h
++++ b/src/backends/native/meta-seat-impl.h
+@@ -147,6 +147,17 @@ void meta_seat_impl_notify_absolute_motion_in_impl (MetaSeatImpl       *seat_imp
+                                                     float               y,
+                                                     double             *axes);
+ 
++void meta_seat_impl_notify_absolute_relative_motion_in_impl (MetaSeatImpl       *seat_impl,
++                                                             ClutterInputDevice *input_device,
++                                                             uint64_t            time_us,
++                                                             float               x,
++                                                             float               y,
++                                                             float               dx,
++                                                             float               dy,
++                                                             float               dx_unaccel,
++                                                             float               dy_unaccel,
++                                                             double             *axes);
++
+ void meta_seat_impl_notify_button_in_impl (MetaSeatImpl       *seat_impl,
+                                            ClutterInputDevice *input_device,
+                                            uint64_t            time_us,
+diff --git a/src/backends/native/meta-virtual-input-device-native.c b/src/backends/native/meta-virtual-input-device-native.c
+index e33925d7ba..20536dbb08 100644
+--- a/src/backends/native/meta-virtual-input-device-native.c
++++ b/src/backends/native/meta-virtual-input-device-native.c
+@@ -64,6 +64,15 @@ typedef struct
+   double y;
+ } MetaVirtualEventMotion;
+ 
++typedef struct
++{
++  uint64_t time_us;
++  double x;
++  double y;
++  double dx;
++  double dy;
++} MetaVirtualEventAbsoluteRelativeMotion;
++
+ typedef struct
+ {
+   uint64_t time_us;
+@@ -96,6 +105,12 @@ typedef struct
+   double y;
+ } MetaVirtualEventTouch;
+ 
++typedef struct
++{
++  uint64_t time_us;
++  GArray *events;
++} MetaVirtualEventTouchBatch;
++
+ G_DEFINE_TYPE (MetaVirtualInputDeviceNative,
+                meta_virtual_input_device_native,
+                CLUTTER_TYPE_VIRTUAL_INPUT_DEVICE)
+@@ -312,6 +327,57 @@ meta_virtual_input_device_native_notify_absolute_motion (ClutterVirtualInputDevi
+   g_object_unref (task);
+ }
+ 
++static gboolean
++notify_absolute_relative_motion_in_impl (GTask *task)
++{
++  MetaVirtualInputDeviceNative *virtual_native =
++    g_task_get_source_object (task);
++  MetaSeatNative *seat_native =
++    meta_virtual_input_device_native_get_seat_native (virtual_native);
++  MetaVirtualEventAbsoluteRelativeMotion *event = g_task_get_task_data (task);
++
++  if (event->time_us == CLUTTER_CURRENT_TIME)
++    event->time_us = g_get_monotonic_time ();
++
++  meta_seat_impl_notify_absolute_relative_motion_in_impl (
++    seat_native->impl, virtual_native->impl_state->device, event->time_us,
++    (float) event->x, (float) event->y, (float) event->dx, (float) event->dy,
++    (float) event->dx, (float) event->dy, NULL);
++  g_task_return_boolean (task, TRUE);
++  return G_SOURCE_REMOVE;
++}
++
++void
++meta_virtual_input_device_native_notify_absolute_relative_motion (
++  MetaVirtualInputDeviceNative *virtual_native,
++  uint64_t                      time_us,
++  double                        x,
++  double                        y,
++  double                        dx,
++  double                        dy)
++{
++  MetaSeatNative *seat_native;
++  MetaVirtualEventAbsoluteRelativeMotion *event;
++  GTask *task;
++
++  g_return_if_fail (META_IS_VIRTUAL_INPUT_DEVICE_NATIVE (virtual_native));
++  g_return_if_fail (virtual_native->impl_state != NULL);
++
++  seat_native = meta_virtual_input_device_native_get_seat_native (virtual_native);
++  event = g_new0 (MetaVirtualEventAbsoluteRelativeMotion, 1);
++  event->time_us = time_us;
++  event->x = x;
++  event->y = y;
++  event->dx = dx;
++  event->dy = dy;
++
++  task = g_task_new (virtual_native, NULL, NULL, NULL);
++  g_task_set_task_data (task, event, g_free);
++  meta_seat_impl_run_input_task (seat_native->impl, task,
++                                 (GSourceFunc) notify_absolute_relative_motion_in_impl);
++  g_object_unref (task);
++}
++
+ static gboolean
+ notify_button_in_impl (GTask *task)
+ {
+@@ -970,6 +1036,123 @@ meta_virtual_input_device_native_notify_touch_up (ClutterVirtualInputDevice *vir
+   g_object_unref (task);
+ }
+ 
++static gboolean
++notify_touch_events_in_impl (GTask *task)
++{
++  MetaVirtualInputDeviceNative *virtual_native =
++    g_task_get_source_object (task);
++  MetaSeatNative *seat_native =
++    meta_virtual_input_device_native_get_seat_native (virtual_native);
++  MetaSeatImpl *seat = seat_native->impl;
++  MetaVirtualEventTouchBatch *batch = g_task_get_task_data (task);
++  GArray *events = batch->events;
++  uint64_t time_us = batch->time_us;
++  guint i;
++
++  for (i = 0; i < events->len; i++)
++    {
++      const MetaVirtualTouchEvent *event =
++        &g_array_index (events, MetaVirtualTouchEvent, i);
++      MetaTouchState *touch_state;
++      int device_slot = virtual_native->slot_base + event->slot;
++
++      switch (event->type)
++        {
++        case META_VIRTUAL_TOUCH_EVENT_DOWN:
++          touch_state = meta_seat_impl_acquire_touch_state_in_impl (seat,
++                                                                    device_slot);
++          if (!touch_state)
++            continue;
++
++          touch_state->coords.x = (float) event->x;
++          touch_state->coords.y = (float) event->y;
++          meta_seat_impl_notify_touch_event_in_impl (
++            seat, virtual_native->impl_state->device, CLUTTER_TOUCH_BEGIN,
++            time_us, touch_state->seat_slot, touch_state->coords.x,
++            touch_state->coords.y);
++          break;
++        case META_VIRTUAL_TOUCH_EVENT_MOTION:
++          touch_state = meta_seat_impl_lookup_touch_state_in_impl (seat,
++                                                                   device_slot);
++          if (!touch_state)
++            continue;
++
++          touch_state->coords.x = (float) event->x;
++          touch_state->coords.y = (float) event->y;
++          meta_seat_impl_notify_touch_event_in_impl (
++            seat, virtual_native->impl_state->device, CLUTTER_TOUCH_UPDATE,
++            time_us, touch_state->seat_slot, touch_state->coords.x,
++            touch_state->coords.y);
++          break;
++        case META_VIRTUAL_TOUCH_EVENT_UP:
++        case META_VIRTUAL_TOUCH_EVENT_CANCEL:
++          touch_state = meta_seat_impl_lookup_touch_state_in_impl (seat,
++                                                                   device_slot);
++          if (!touch_state)
++            continue;
++
++          meta_seat_impl_notify_touch_event_in_impl (
++            seat, virtual_native->impl_state->device,
++            event->type == META_VIRTUAL_TOUCH_EVENT_UP ? CLUTTER_TOUCH_END :
++                                                         CLUTTER_TOUCH_CANCEL,
++            time_us, touch_state->seat_slot, touch_state->coords.x,
++            touch_state->coords.y);
++          meta_seat_impl_release_touch_state_in_impl (seat,
++                                                       touch_state->seat_slot);
++          break;
++        }
++    }
++
++  g_task_return_boolean (task, TRUE);
++  return G_SOURCE_REMOVE;
++}
++
++static void
++meta_virtual_event_touch_batch_free (MetaVirtualEventTouchBatch *batch)
++{
++  g_clear_pointer (&batch->events, g_array_unref);
++  g_free (batch);
++}
++
++void
++meta_virtual_input_device_native_notify_touch_events (
++  MetaVirtualInputDeviceNative *virtual_native,
++  uint64_t                      time_us,
++  const MetaVirtualTouchEvent  *events,
++  gsize                         n_events)
++{
++  MetaSeatNative *seat_native;
++  MetaVirtualEventTouchBatch *batch;
++  GArray *copied_events;
++  GTask *task;
++  gsize i;
++
++  g_return_if_fail (META_IS_VIRTUAL_INPUT_DEVICE_NATIVE (virtual_native));
++  g_return_if_fail (virtual_native->impl_state != NULL);
++  g_return_if_fail (n_events > 0);
++  g_return_if_fail (events != NULL);
++
++  copied_events = g_array_sized_new (FALSE, FALSE, sizeof (*events), n_events);
++  for (i = 0; i < n_events; i++)
++    {
++      g_return_if_fail (events[i].slot >= 0 &&
++                        events[i].slot < CLUTTER_VIRTUAL_INPUT_DEVICE_MAX_TOUCH_SLOTS);
++      g_array_append_val (copied_events, events[i]);
++    }
++
++  seat_native = meta_virtual_input_device_native_get_seat_native (virtual_native);
++  batch = g_new0 (MetaVirtualEventTouchBatch, 1);
++  batch->time_us = time_us == CLUTTER_CURRENT_TIME ?
++    g_get_monotonic_time () : time_us;
++  batch->events = copied_events;
++  task = g_task_new (virtual_native, NULL, NULL, NULL);
++  g_task_set_task_data (task, batch,
++                        (GDestroyNotify) meta_virtual_event_touch_batch_free);
++  meta_seat_impl_run_input_task (seat_native->impl, task,
++                                 (GSourceFunc) notify_touch_events_in_impl);
++  g_object_unref (task);
++}
++
+ static void
+ meta_virtual_input_device_native_get_property (GObject    *object,
+                                                guint       prop_id,
+diff --git a/src/backends/native/meta-virtual-input-device-native.h b/src/backends/native/meta-virtual-input-device-native.h
+index a41b5ed294..149c989282 100644
+--- a/src/backends/native/meta-virtual-input-device-native.h
++++ b/src/backends/native/meta-virtual-input-device-native.h
+@@ -19,6 +19,8 @@
+ 
+ #pragma once
+ 
++#include <stdint.h>
++
+ #include "clutter/clutter-virtual-input-device.h"
+ 
+ #define META_TYPE_VIRTUAL_INPUT_DEVICE_NATIVE (meta_virtual_input_device_native_get_type ())
+@@ -26,3 +28,33 @@ G_DECLARE_FINAL_TYPE (MetaVirtualInputDeviceNative,
+                       meta_virtual_input_device_native,
+                       META, VIRTUAL_INPUT_DEVICE_NATIVE,
+                       ClutterVirtualInputDevice)
++
++typedef enum
++{
++  META_VIRTUAL_TOUCH_EVENT_DOWN,
++  META_VIRTUAL_TOUCH_EVENT_MOTION,
++  META_VIRTUAL_TOUCH_EVENT_UP,
++  META_VIRTUAL_TOUCH_EVENT_CANCEL,
++} MetaVirtualTouchEventType;
++
++typedef struct
++{
++  MetaVirtualTouchEventType type;
++  int slot;
++  double x;
++  double y;
++} MetaVirtualTouchEvent;
++
++void meta_virtual_input_device_native_notify_absolute_relative_motion (
++  MetaVirtualInputDeviceNative *virtual_device,
++  uint64_t                      time_us,
++  double                        x,
++  double                        y,
++  double                        dx,
++  double                        dy);
++
++void meta_virtual_input_device_native_notify_touch_events (
++  MetaVirtualInputDeviceNative *virtual_device,
++  uint64_t                      time_us,
++  const MetaVirtualTouchEvent  *events,
++  gsize                         n_events);
+diff --git a/src/meson.build b/src/meson.build
+index 2fc372b617..e61bea7cdc 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -927,6 +927,8 @@ if have_anland
+   mutter_sources += [
+     'backends/anland/meta-backend-anland.c',
+     'backends/anland/meta-backend-anland.h',
++    'backends/anland/meta-anland-input.c',
++    'backends/anland/meta-anland-input.h',
+     'backends/anland/vendor/meta-anland-socket-utils.c',
+     'backends/anland/vendor/meta-anland-socket-utils.h',
+     'backends/anland/vendor/meta-anland-transport.c',
+diff --git a/src/tests/anland-transport-tests.c b/src/tests/anland-transport-tests.c
+index 0e17cec208..77c39e376a 100644
+--- a/src/tests/anland-transport-tests.c
++++ b/src/tests/anland-transport-tests.c
+@@ -358,6 +358,30 @@ test_transport_and_reconnect (void)
+                                                               sizeof (received_text), 100), ==, 1);
+   g_assert_cmpmem (received_text, sizeof (received_text), text, sizeof (text));
+ 
++  event = (struct InputEvent) {
++    .type = INPUT_TYPE_POINTER_MOTION,
++    .pointer_motion = {
++      .x = 640.0f,
++      .y = 360.0f,
++      .dx = -2.5f,
++      .dy = 1.5f,
++    },
++  };
++  send_data_message (peers.data, DATA_MSG_INPUT_EVENT, &event, sizeof (event));
++  g_assert_cmpint (meta_anland_transport_poll_input_event (transport, &received_event, 100), ==, 1);
++  g_assert_cmpuint (received_event.type, ==, INPUT_TYPE_POINTER_MOTION);
++  g_assert_cmpfloat (received_event.pointer_motion.x, ==, 640.0f);
++  g_assert_cmpfloat (received_event.pointer_motion.dy, ==, 1.5f);
++
++  event = (struct InputEvent) {
++    .type = INPUT_TYPE_DISPLAY_REFRESH,
++    .display = { .refresh_mhz = 90000 },
++  };
++  send_data_message (peers.data, DATA_MSG_INPUT_EVENT, &event, sizeof (event));
++  g_assert_cmpint (meta_anland_transport_poll_input_event (transport, &received_event, 100), ==, 1);
++  g_assert_cmpuint (received_event.type, ==, INPUT_TYPE_DISPLAY_REFRESH);
++  g_assert_cmpuint (received_event.display.refresh_mhz, ==, 90000);
++
+   output.type = OUTPUT_TYPE_CLIPBOARD;
+   output.clipboard.size = sizeof (text);
+   g_assert_true (meta_anland_transport_send_output_event (transport, &output,

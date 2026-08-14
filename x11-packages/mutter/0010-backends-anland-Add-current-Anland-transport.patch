@@ -1,0 +1,1694 @@
+From 93d1a7b64da000e54eda7c76d3397187bbe58510 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 2 Aug 2026 08:50:33 +0800
+Subject: [PATCH 10/27] backends/anland: Add current Anland transport
+
+Add a standalone producer transport for the current Anland: Termux wire ABI. Keep the daemon control connection alive while no Android consumer is present, and report a lost control channel separately from malformed handoff data.
+
+Own the five handoff descriptors, dma-bufs, shared selected-buffer index, frame fence, input framing, output payloads, and fallback transition in one context.
+
+Add a mock daemon test covering the 5.13 ABI, no-consumer retry, dma-buf metadata, readiness and audio fd order, clipboard framing, native fence transfer, consumer loss, and reconnect.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0001-backends-anland-Add-current-Anland-transport.patch
+
+diff --git a/src/backends/anland/vendor/meta-anland-protocol.h b/src/backends/anland/vendor/meta-anland-protocol.h
+new file mode 100644
+index 0000000000..804385f130
+--- /dev/null
++++ b/src/backends/anland/vendor/meta-anland-protocol.h
+@@ -0,0 +1,183 @@
++#ifndef META_ANLAND_PROTOCOL_H
++#define META_ANLAND_PROTOCOL_H
++
++#include <stdint.h>
++
++#define CTRL_MSG_CONSUMER_HELLO 1
++#define CTRL_MSG_PRODUCER_HELLO 2
++#define CTRL_MSG_SCREEN_INFO 7
++#define CTRL_MSG_REJECT 8
++#define CTRL_MSG_PICKUP_FDS 9
++#define CTRL_MSG_FDS_READY 10
++
++#define DATA_MSG_BUF_READY 100
++#define DATA_MSG_REFRESH_DONE 101
++#define DATA_MSG_INPUT_EVENT 102
++#define DATA_MSG_OUTPUT_EVENT 103
++#define DATA_MSG_INPUT_EXTEND_FDS 104
++#define DATA_MSG_BUFS_READY 200
++
++#define MAX_BUFS 8
++
++struct ctrl_msg
++{
++  uint32_t type;
++  uint32_t size;
++  uint8_t payload[];
++} __attribute__ ((packed));
++
++struct data_msg
++{
++  uint32_t type;
++  uint32_t size;
++  uint8_t payload[];
++} __attribute__ ((packed));
++
++struct screen_info
++{
++  uint32_t width;
++  uint32_t height;
++  uint32_t format;
++  uint32_t refresh;
++} __attribute__ ((packed));
++
++struct buf_info
++{
++  uint32_t stride;
++  uint32_t width;
++  uint32_t height;
++  uint32_t format;
++  uint64_t modifier;
++  uint32_t offset;
++} __attribute__ ((packed));
++
++#define INPUT_TYPE_TOUCH 1
++#define INPUT_TYPE_KEY 2
++#define INPUT_TYPE_POINTER_MOTION 3
++#define INPUT_TYPE_POINTER_BUTTON 4
++#define INPUT_TYPE_POINTER_AXIS 5
++#define INPUT_TYPE_TOUCH_FRAME 6
++#define INPUT_TYPE_DISPLAY_REFRESH 7
++#define INPUT_TYPE_CLIPBOARD 8
++#define INPUT_TYPE_TEXT_INPUT 9
++#define INPUT_TYPE_ACTION 10
++#define INPUT_TYPE_RESOURCE 11
++
++#define SERVICE_TYPE_CAMERA 1
++
++#define INPUT_ACTION_DOWN 0
++#define INPUT_ACTION_UP 1
++#define INPUT_ACTION_MOVE 2
++
++#define OUTPUT_TYPE_CLIPBOARD 1
++#define OUTPUT_TYPE_RESOURCES_REQUEST 2
++
++struct InputEvent
++{
++  uint32_t type;
++  union
++  {
++    struct
++    {
++      int32_t action;
++      float x;
++      float y;
++      int32_t pointer_id;
++    } touch;
++    struct
++    {
++      int32_t action;
++      int32_t keycode;
++    } key;
++    struct
++    {
++      float x;
++      float y;
++      float dx;
++      float dy;
++    } pointer_motion;
++    struct
++    {
++      uint32_t button;
++      int32_t pressed;
++    } pointer_button;
++    struct
++    {
++      uint32_t axis;
++      float value;
++      int32_t discrete;
++    } pointer_axis;
++    struct
++    {
++      uint32_t refresh_mhz;
++    } display;
++    struct
++    {
++      uint32_t size;
++    } clipboard;
++    struct
++    {
++      uint32_t size;
++    } text_input;
++    struct
++    {
++      uint32_t action;
++      int32_t value;
++    } input_action;
++    struct
++    {
++      uint32_t type;
++      uint32_t fdnum;
++    } resource;
++    struct
++    {
++      uint32_t padding[4];
++    };
++  };
++} __attribute__ ((packed));
++
++struct OutputEvent
++{
++  uint32_t type;
++  union
++  {
++    struct
++    {
++      uint32_t size;
++    } clipboard;
++    struct
++    {
++      uint32_t type;
++      uint32_t args[3];
++    } resources_request;
++    struct
++    {
++      uint32_t padding[4];
++    };
++  };
++} __attribute__ ((packed));
++
++#define AUDIO_MSG_FORMAT 1
++#define AUDIO_MSG_PCM 2
++
++#define AUDIO_FORMAT_S16LE 0
++
++#define AUDIO_ROLE_PLAYBACK 0
++#define AUDIO_ROLE_CAPTURE 1
++
++struct audio_format
++{
++  uint32_t rate;
++  uint32_t channels;
++  uint32_t format;
++  uint32_t role;
++  uint32_t quantum;
++} __attribute__ ((packed));
++
++struct audio_msg
++{
++  uint32_t type;
++  uint32_t size;
++} __attribute__ ((packed));
++
++#endif /* META_ANLAND_PROTOCOL_H */
+diff --git a/src/backends/anland/vendor/meta-anland-socket-utils.c b/src/backends/anland/vendor/meta-anland-socket-utils.c
+new file mode 100644
+index 0000000000..01beee104b
+--- /dev/null
++++ b/src/backends/anland/vendor/meta-anland-socket-utils.c
+@@ -0,0 +1,210 @@
++#include "meta-anland-socket-utils.h"
++
++#include <errno.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++int
++meta_anland_connect_unix (const char *path)
++{
++  struct sockaddr_un address = { 0 };
++  int fd;
++
++  if (!path || strlen (path) >= sizeof (address.sun_path))
++    {
++      errno = ENAMETOOLONG;
++      return -1;
++    }
++
++  fd = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++  if (fd < 0)
++    return -1;
++
++  address.sun_family = AF_UNIX;
++  strcpy (address.sun_path, path);
++  if (connect (fd, (struct sockaddr *) &address, sizeof (address)) < 0)
++    {
++      close (fd);
++      return -1;
++    }
++
++  return fd;
++}
++
++int
++meta_anland_send_all (int         fd,
++                      const void *buffer,
++                      size_t      length)
++{
++  const uint8_t *data = buffer;
++  size_t sent = 0;
++
++  while (sent < length)
++    {
++      ssize_t n = send (fd, data + sent, length - sent, MSG_NOSIGNAL);
++
++      if (n > 0)
++        {
++          sent += n;
++          continue;
++        }
++      if (n < 0 && errno == EINTR)
++        continue;
++
++      return -1;
++    }
++
++  return 0;
++}
++
++int
++meta_anland_recv_all (int    fd,
++                      void  *buffer,
++                      size_t length)
++{
++  uint8_t *data = buffer;
++  size_t received = 0;
++
++  while (received < length)
++    {
++      ssize_t n = recv (fd, data + received, length - received, 0);
++
++      if (n > 0)
++        {
++          received += n;
++          continue;
++        }
++      if (n < 0 && errno == EINTR)
++        continue;
++
++      return -1;
++    }
++
++  return 0;
++}
++
++int
++meta_anland_send_fds (int         fd,
++                      const void *buffer,
++                      size_t      length,
++                      const int  *fds,
++                      int         n_fds)
++{
++  struct iovec iov = { .iov_base = (void *) buffer, .iov_len = length };
++  struct msghdr message = { .msg_iov = &iov, .msg_iovlen = 1 };
++  struct cmsghdr *cmsg;
++  size_t control_length;
++  char *control;
++  ssize_t n;
++
++  if (!buffer || length == 0 || !fds || n_fds <= 0)
++    {
++      errno = EINVAL;
++      return -1;
++    }
++
++  control_length = CMSG_SPACE (sizeof (int) * (size_t) n_fds);
++  control = calloc (1, control_length);
++  if (!control)
++    return -1;
++
++  message.msg_control = control;
++  message.msg_controllen = control_length;
++  cmsg = CMSG_FIRSTHDR (&message);
++  cmsg->cmsg_level = SOL_SOCKET;
++  cmsg->cmsg_type = SCM_RIGHTS;
++  cmsg->cmsg_len = CMSG_LEN (sizeof (int) * (size_t) n_fds);
++  memcpy (CMSG_DATA (cmsg), fds, sizeof (int) * (size_t) n_fds);
++
++  do
++    n = sendmsg (fd, &message, MSG_NOSIGNAL);
++  while (n < 0 && errno == EINTR);
++
++  free (control);
++  return n == (ssize_t) length ? 0 : -1;
++}
++
++int
++meta_anland_recv_fds (int    fd,
++                      void  *buffer,
++                      size_t length,
++                      int   *fds,
++                      int    max_fds,
++                      int   *n_fds)
++{
++  struct iovec iov = { .iov_base = buffer, .iov_len = length };
++  struct msghdr message = { .msg_iov = &iov, .msg_iovlen = 1 };
++  size_t control_length;
++  char *control;
++  ssize_t n;
++
++  if (!buffer || length == 0 || !fds || max_fds <= 0 || !n_fds)
++    {
++      errno = EINVAL;
++      return -1;
++    }
++
++  *n_fds = 0;
++  control_length = CMSG_SPACE (sizeof (int) * (size_t) max_fds);
++  control = calloc (1, control_length);
++  if (!control)
++    return -1;
++
++  message.msg_control = control;
++  message.msg_controllen = control_length;
++  do
++    n = recvmsg (fd, &message, MSG_CMSG_CLOEXEC);
++  while (n < 0 && errno == EINTR);
++
++  if (n <= 0)
++    goto fail;
++
++  for (struct cmsghdr *cmsg = CMSG_FIRSTHDR (&message);
++       cmsg;
++       cmsg = CMSG_NXTHDR (&message, cmsg))
++    {
++      int count;
++      int available;
++      int copy_count;
++
++      if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)
++        continue;
++      if (cmsg->cmsg_len < CMSG_LEN (0) ||
++          (cmsg->cmsg_len - CMSG_LEN (0)) % sizeof (int) != 0)
++        goto fail;
++
++      count = (int) ((cmsg->cmsg_len - CMSG_LEN (0)) / sizeof (int));
++      available = max_fds - *n_fds;
++      copy_count = count < available ? count : available;
++      memcpy (fds + *n_fds, CMSG_DATA (cmsg),
++              sizeof (int) * (size_t) copy_count);
++      *n_fds += copy_count;
++      for (int i = copy_count; i < count; i++)
++        {
++          int received_fd;
++
++          memcpy (&received_fd, (int *) CMSG_DATA (cmsg) + i,
++                  sizeof (received_fd));
++          close (received_fd);
++        }
++    }
++
++  if (!(message.msg_flags & MSG_CTRUNC))
++    {
++      free (control);
++      return (int) n;
++    }
++
++  errno = EMSGSIZE;
++
++fail:
++  for (int i = 0; i < *n_fds; i++)
++    close (fds[i]);
++  *n_fds = 0;
++  free (control);
++  return -1;
++}
+diff --git a/src/backends/anland/vendor/meta-anland-socket-utils.h b/src/backends/anland/vendor/meta-anland-socket-utils.h
+new file mode 100644
+index 0000000000..8daf5299e4
+--- /dev/null
++++ b/src/backends/anland/vendor/meta-anland-socket-utils.h
+@@ -0,0 +1,27 @@
++#ifndef META_ANLAND_SOCKET_UTILS_H
++#define META_ANLAND_SOCKET_UTILS_H
++
++#include <stddef.h>
++
++int meta_anland_connect_unix (const char *path);
++
++int meta_anland_send_all (int          fd,
++                          const void  *buffer,
++                          size_t       length);
++int meta_anland_recv_all (int    fd,
++                          void  *buffer,
++                          size_t length);
++
++int meta_anland_send_fds (int          fd,
++                          const void  *buffer,
++                          size_t       length,
++                          const int   *fds,
++                          int          n_fds);
++int meta_anland_recv_fds (int    fd,
++                          void  *buffer,
++                          size_t length,
++                          int   *fds,
++                          int    max_fds,
++                          int   *n_fds);
++
++#endif /* META_ANLAND_SOCKET_UTILS_H */
+diff --git a/src/backends/anland/vendor/meta-anland-transport.c b/src/backends/anland/vendor/meta-anland-transport.c
+new file mode 100644
+index 0000000000..a5ef702dfc
+--- /dev/null
++++ b/src/backends/anland/vendor/meta-anland-transport.c
+@@ -0,0 +1,706 @@
++#include "meta-anland-transport.h"
++
++#include "meta-anland-socket-utils.h"
++
++#include <errno.h>
++#include <poll.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#define HANDSHAKE_TIMEOUT_MS 100
++#define INPUT_TIMEOUT_MS 100
++
++struct _MetaAnlandTransport
++{
++  int control_fd;
++  int data_fd;
++  int buffer_ready_fd;
++  int fence_fd;
++  int shm_fd;
++  int audio_fd;
++  int pending_render_fence_fd;
++  volatile uint32_t *selected_buffer;
++
++  struct screen_info screen_info;
++  int buffer_fds[MAX_BUFS];
++  struct buf_info buffer_infos[MAX_BUFS];
++  int n_buffers;
++  bool fallback;
++
++  void (*fallback_callback) (void *user_data);
++  void *fallback_user_data;
++};
++
++static void
++close_fds (int *fds,
++           int  n_fds)
++{
++  for (int i = 0; i < n_fds; i++)
++    {
++      if (fds[i] >= 0)
++        close (fds[i]);
++    }
++}
++
++static void
++release_consumer_resources (MetaAnlandTransport *transport)
++{
++  for (int i = 0; i < transport->n_buffers; i++)
++    {
++      if (transport->buffer_fds[i] >= 0)
++        {
++          close (transport->buffer_fds[i]);
++          transport->buffer_fds[i] = -1;
++        }
++    }
++  transport->n_buffers = 0;
++
++  if (transport->selected_buffer)
++    {
++      munmap ((void *) transport->selected_buffer, sizeof (uint32_t));
++      transport->selected_buffer = NULL;
++    }
++
++  if (transport->data_fd >= 0)
++    close (transport->data_fd);
++  if (transport->buffer_ready_fd >= 0)
++    close (transport->buffer_ready_fd);
++  if (transport->fence_fd >= 0)
++    close (transport->fence_fd);
++  if (transport->shm_fd >= 0)
++    close (transport->shm_fd);
++  if (transport->audio_fd >= 0)
++    close (transport->audio_fd);
++  if (transport->pending_render_fence_fd >= 0)
++    close (transport->pending_render_fence_fd);
++
++  transport->data_fd = -1;
++  transport->buffer_ready_fd = -1;
++  transport->fence_fd = -1;
++  transport->shm_fd = -1;
++  transport->audio_fd = -1;
++  transport->pending_render_fence_fd = -1;
++}
++
++static void
++enter_fallback (MetaAnlandTransport *transport)
++{
++  if (transport->fallback)
++    return;
++
++  transport->fallback = true;
++  release_consumer_resources (transport);
++  if (transport->fallback_callback)
++    transport->fallback_callback (transport->fallback_user_data);
++}
++
++static int
++wait_for_fd (int fd,
++             short events,
++             int timeout_ms)
++{
++  struct pollfd poll_fd = { .fd = fd, .events = events };
++  int result;
++
++  do
++    result = poll (&poll_fd, 1, timeout_ms);
++  while (result < 0 && errno == EINTR);
++
++  if (result <= 0)
++    return result;
++  if (poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL))
++    return -1;
++  return poll_fd.revents & events ? 1 : -1;
++}
++
++static int
++recv_all_timeout (int    fd,
++                  void  *buffer,
++                  size_t size,
++                  int    timeout_ms)
++{
++  uint8_t *data = buffer;
++  size_t received = 0;
++
++  while (received < size)
++    {
++      ssize_t n = recv (fd, data + received, size - received, MSG_DONTWAIT);
++
++      if (n > 0)
++        {
++          received += n;
++          continue;
++        }
++      if (n == 0)
++        return -1;
++      if (errno == EINTR)
++        continue;
++      if (errno != EAGAIN)
++        return -1;
++      if (wait_for_fd (fd, POLLIN, timeout_ms) != 1)
++        return -1;
++    }
++
++  return 0;
++}
++
++static int
++send_all_timeout (int         fd,
++                  const void *buffer,
++                  size_t      size,
++                  int         timeout_ms)
++{
++  const uint8_t *data = buffer;
++  size_t sent = 0;
++
++  while (sent < size)
++    {
++      ssize_t n = send (fd, data + sent, size - sent,
++                        MSG_NOSIGNAL | MSG_DONTWAIT);
++
++      if (n > 0)
++        {
++          sent += n;
++          continue;
++        }
++      if (n < 0 && errno == EINTR)
++        continue;
++      if (n < 0 && errno == EAGAIN &&
++          wait_for_fd (fd, POLLOUT, timeout_ms) == 1)
++        continue;
++
++      return -1;
++    }
++
++  return 0;
++}
++
++static int
++recv_fds_exact (int    fd,
++                void  *buffer,
++                size_t size,
++                int   *fds,
++                int    max_fds,
++                int   *n_fds)
++{
++  int received;
++
++  received = meta_anland_recv_fds (fd, buffer, size, fds, max_fds, n_fds);
++  if (received < 0)
++    return -1;
++  if ((size_t) received < size &&
++      meta_anland_recv_all (fd, (uint8_t *) buffer + received,
++                            size - (size_t) received) < 0)
++    return -1;
++
++  return 0;
++}
++
++static int
++discard_data_payload (MetaAnlandTransport *transport,
++                      uint32_t             size)
++{
++  uint8_t buffer[4096];
++
++  if (size > META_ANLAND_MAX_PAYLOAD_SIZE)
++    return -1;
++
++  while (size > 0)
++    {
++      size_t chunk = size < sizeof (buffer) ? size : sizeof (buffer);
++
++      if (recv_all_timeout (transport->data_fd, buffer, chunk,
++                            INPUT_TIMEOUT_MS) < 0)
++        return -1;
++      size -= (uint32_t) chunk;
++    }
++
++  return 0;
++}
++
++static MetaAnlandTransportPickupResult
++pickup_fds (MetaAnlandTransport *transport)
++{
++  struct ctrl_msg request = { .type = CTRL_MSG_PICKUP_FDS, .size = 0 };
++  struct ctrl_msg response;
++  int fds[5] = { -1, -1, -1, -1, -1 };
++  int n_fds = 0;
++  int wait_result;
++
++  if (meta_anland_send_all (transport->control_fd, &request,
++                            sizeof (request)) < 0)
++    return META_ANLAND_TRANSPORT_PICKUP_DAEMON_LOST;
++
++  wait_result = wait_for_fd (transport->control_fd, POLLIN,
++                             HANDSHAKE_TIMEOUT_MS);
++  if (wait_result == 0)
++    return META_ANLAND_TRANSPORT_PICKUP_NO_CONSUMER;
++  if (wait_result < 0 ||
++      recv_fds_exact (transport->control_fd, &response, sizeof (response),
++                      fds, 5, &n_fds) < 0)
++    {
++      close_fds (fds, n_fds);
++      return META_ANLAND_TRANSPORT_PICKUP_DAEMON_LOST;
++    }
++
++  if (response.type != CTRL_MSG_FDS_READY || response.size != 0 || n_fds != 5)
++    {
++      close_fds (fds, n_fds);
++      return META_ANLAND_TRANSPORT_PICKUP_PROTOCOL_ERROR;
++    }
++
++  transport->buffer_ready_fd = fds[0];
++  transport->fence_fd = fds[1];
++  transport->data_fd = fds[2];
++  transport->shm_fd = fds[3];
++  transport->audio_fd = fds[4];
++  transport->selected_buffer = mmap (NULL, sizeof (uint32_t), PROT_READ,
++                                     MAP_SHARED, transport->shm_fd, 0);
++  if (transport->selected_buffer == MAP_FAILED)
++    {
++      transport->selected_buffer = NULL;
++      return META_ANLAND_TRANSPORT_PICKUP_PROTOCOL_ERROR;
++    }
++
++  return META_ANLAND_TRANSPORT_PICKUP_READY;
++}
++
++static MetaAnlandTransportPickupResult
++receive_buffers (MetaAnlandTransport *transport)
++{
++  struct data_msg header;
++  struct buf_info buffer_infos[MAX_BUFS];
++  int fds[MAX_BUFS] = { -1, -1, -1, -1, -1, -1, -1, -1 };
++  int n_fds = 0;
++  int n_buffers;
++
++  if (wait_for_fd (transport->data_fd, POLLIN, HANDSHAKE_TIMEOUT_MS) != 1 ||
++      recv_fds_exact (transport->data_fd, &header, sizeof (header),
++                      fds, MAX_BUFS, &n_fds) < 0)
++    {
++      close_fds (fds, n_fds);
++      return META_ANLAND_TRANSPORT_PICKUP_NO_CONSUMER;
++    }
++
++  if (header.type != DATA_MSG_BUFS_READY || header.size == 0 ||
++      header.size % sizeof (struct buf_info) != 0)
++    goto protocol_error;
++
++  n_buffers = (int) (header.size / sizeof (struct buf_info));
++  if (n_buffers != n_fds || n_buffers < 1 || n_buffers > MAX_BUFS ||
++      meta_anland_recv_all (transport->data_fd, buffer_infos,
++                            header.size) < 0)
++    goto protocol_error;
++
++  for (int i = 0; i < n_buffers; i++)
++    {
++      if (buffer_infos[i].width == 0 || buffer_infos[i].height == 0 ||
++          buffer_infos[i].stride == 0 ||
++          (i > 0 && (buffer_infos[i].width != buffer_infos[0].width ||
++                     buffer_infos[i].height != buffer_infos[0].height ||
++                     buffer_infos[i].format != buffer_infos[0].format)))
++        goto protocol_error;
++    }
++
++  for (int i = 0; i < n_buffers; i++)
++    {
++      transport->buffer_fds[i] = fds[i];
++      transport->buffer_infos[i] = buffer_infos[i];
++    }
++  transport->n_buffers = n_buffers;
++  return META_ANLAND_TRANSPORT_PICKUP_READY;
++
++protocol_error:
++  close_fds (fds, n_fds);
++  return META_ANLAND_TRANSPORT_PICKUP_PROTOCOL_ERROR;
++}
++
++int
++meta_anland_transport_connect (MetaAnlandTransport **out_transport,
++                               const char           *socket_path)
++{
++  MetaAnlandTransport *transport;
++  struct ctrl_msg request = { .type = CTRL_MSG_PRODUCER_HELLO, .size = 0 };
++  struct ctrl_msg response;
++  struct screen_info screen_info;
++
++  if (!out_transport || !socket_path)
++    return -1;
++
++  *out_transport = NULL;
++  transport = calloc (1, sizeof (*transport));
++  if (!transport)
++    return -1;
++
++  transport->control_fd = -1;
++  transport->data_fd = -1;
++  transport->buffer_ready_fd = -1;
++  transport->fence_fd = -1;
++  transport->shm_fd = -1;
++  transport->audio_fd = -1;
++  transport->pending_render_fence_fd = -1;
++  transport->fallback = true;
++  for (int i = 0; i < MAX_BUFS; i++)
++    transport->buffer_fds[i] = -1;
++
++  transport->control_fd = meta_anland_connect_unix (socket_path);
++  if (transport->control_fd < 0 ||
++      meta_anland_send_all (transport->control_fd, &request,
++                            sizeof (request)) < 0 ||
++      meta_anland_recv_all (transport->control_fd, &response,
++                            sizeof (response)) < 0 ||
++      response.type != CTRL_MSG_SCREEN_INFO ||
++      response.size != sizeof (screen_info) ||
++      meta_anland_recv_all (transport->control_fd, &screen_info,
++                            sizeof (screen_info)) < 0)
++    {
++      if (transport->control_fd >= 0)
++        close (transport->control_fd);
++      free (transport);
++      return -1;
++    }
++
++  transport->screen_info = screen_info;
++  *out_transport = transport;
++  return 0;
++}
++
++void
++meta_anland_transport_disconnect (MetaAnlandTransport *transport)
++{
++  if (!transport)
++    return;
++
++  release_consumer_resources (transport);
++  if (transport->control_fd >= 0)
++    close (transport->control_fd);
++  free (transport);
++}
++
++bool
++meta_anland_transport_get_screen_info (MetaAnlandTransport *transport,
++                                       struct screen_info   *screen_info)
++{
++  if (!transport || !screen_info)
++    return false;
++
++  *screen_info = transport->screen_info;
++  return true;
++}
++
++MetaAnlandTransportPickupResult
++meta_anland_transport_try_pickup (MetaAnlandTransport *transport)
++{
++  MetaAnlandTransportPickupResult result;
++
++  if (!transport)
++    return META_ANLAND_TRANSPORT_PICKUP_PROTOCOL_ERROR;
++  if (!transport->fallback)
++    return META_ANLAND_TRANSPORT_PICKUP_READY;
++
++  result = pickup_fds (transport);
++  if (result != META_ANLAND_TRANSPORT_PICKUP_READY)
++    {
++      release_consumer_resources (transport);
++      return result;
++    }
++
++  result = receive_buffers (transport);
++  if (result != META_ANLAND_TRANSPORT_PICKUP_READY)
++    {
++      release_consumer_resources (transport);
++      return result;
++    }
++
++  transport->fallback = false;
++  return META_ANLAND_TRANSPORT_PICKUP_READY;
++}
++
++bool
++meta_anland_transport_is_fallback (MetaAnlandTransport *transport)
++{
++  return !transport || transport->fallback;
++}
++
++void
++meta_anland_transport_set_fallback_callback (MetaAnlandTransport *transport,
++                                             void                 (*callback) (void *user_data),
++                                             void                  *user_data)
++{
++  transport->fallback_callback = callback;
++  transport->fallback_user_data = user_data;
++}
++
++int
++meta_anland_transport_get_buffer_ready_fd (MetaAnlandTransport *transport)
++{
++  return transport && !transport->fallback ? transport->buffer_ready_fd : -1;
++}
++
++int
++meta_anland_transport_get_data_fd (MetaAnlandTransport *transport)
++{
++  return transport && !transport->fallback ? transport->data_fd : -1;
++}
++
++int
++meta_anland_transport_get_audio_fd (MetaAnlandTransport *transport)
++{
++  return transport && !transport->fallback ? transport->audio_fd : -1;
++}
++
++int
++meta_anland_transport_get_buffer_count (MetaAnlandTransport *transport)
++{
++  return transport && !transport->fallback ? transport->n_buffers : 0;
++}
++
++int
++meta_anland_transport_get_selected_buffer (MetaAnlandTransport *transport)
++{
++  uint32_t selected;
++
++  if (!transport || transport->fallback || !transport->selected_buffer)
++    return -1;
++
++  selected = *transport->selected_buffer;
++  return selected < (uint32_t) transport->n_buffers ? (int) selected : -1;
++}
++
++int
++meta_anland_transport_get_buffer_fd (MetaAnlandTransport *transport,
++                                     int                   index)
++{
++  if (!transport || transport->fallback || index < 0 ||
++      index >= transport->n_buffers)
++    return -1;
++
++  return transport->buffer_fds[index];
++}
++
++bool
++meta_anland_transport_get_buffer_info (MetaAnlandTransport *transport,
++                                       int                   index,
++                                       struct buf_info      *buffer_info)
++{
++  if (!transport || !buffer_info || transport->fallback || index < 0 ||
++      index >= transport->n_buffers)
++    return false;
++
++  *buffer_info = transport->buffer_infos[index];
++  return true;
++}
++
++void
++meta_anland_transport_set_render_fence (MetaAnlandTransport *transport,
++                                        int                   fence_fd)
++{
++  if (!transport)
++    {
++      if (fence_fd >= 0)
++        close (fence_fd);
++      return;
++    }
++
++  if (transport->pending_render_fence_fd >= 0)
++    close (transport->pending_render_fence_fd);
++  transport->pending_render_fence_fd = fence_fd;
++}
++
++bool
++meta_anland_transport_notify_frame_done (MetaAnlandTransport *transport)
++{
++  struct iovec iov;
++  struct msghdr message = { 0 };
++  char byte = 0;
++  union
++  {
++    char bytes[CMSG_SPACE (sizeof (int))];
++    struct cmsghdr align;
++  } control = { 0 };
++  ssize_t n;
++
++  if (!transport)
++    return false;
++  if (transport->fallback)
++    {
++      if (transport->pending_render_fence_fd >= 0)
++        close (transport->pending_render_fence_fd);
++      transport->pending_render_fence_fd = -1;
++      return false;
++    }
++
++  iov.iov_base = &byte;
++  iov.iov_len = sizeof (byte);
++  message.msg_iov = &iov;
++  message.msg_iovlen = 1;
++  if (transport->pending_render_fence_fd >= 0)
++    {
++      struct cmsghdr *cmsg;
++
++      message.msg_control = control.bytes;
++      message.msg_controllen = sizeof (control.bytes);
++      cmsg = CMSG_FIRSTHDR (&message);
++      cmsg->cmsg_level = SOL_SOCKET;
++      cmsg->cmsg_type = SCM_RIGHTS;
++      cmsg->cmsg_len = CMSG_LEN (sizeof (int));
++      memcpy (CMSG_DATA (cmsg), &transport->pending_render_fence_fd,
++              sizeof (transport->pending_render_fence_fd));
++    }
++
++  do
++    n = sendmsg (transport->fence_fd, &message, MSG_NOSIGNAL | MSG_DONTWAIT);
++  while (n < 0 && errno == EINTR);
++
++  if (transport->pending_render_fence_fd >= 0)
++    {
++      close (transport->pending_render_fence_fd);
++      transport->pending_render_fence_fd = -1;
++    }
++
++  if (n == 1)
++    return true;
++
++  enter_fallback (transport);
++  return false;
++}
++
++int
++meta_anland_transport_poll_input_event (MetaAnlandTransport *transport,
++                                        struct InputEvent    *event,
++                                        int                   timeout_ms)
++{
++  struct data_msg header;
++
++  if (!transport || !event || transport->fallback)
++    return 0;
++
++  for (;;)
++    {
++      int wait_result = wait_for_fd (transport->data_fd, POLLIN, timeout_ms);
++
++      if (wait_result == 0)
++        return 0;
++      if (wait_result < 0 ||
++          recv_all_timeout (transport->data_fd, &header, sizeof (header),
++                            INPUT_TIMEOUT_MS) < 0)
++        {
++          enter_fallback (transport);
++          return -1;
++        }
++
++      if (header.type != DATA_MSG_INPUT_EVENT)
++        {
++          if (discard_data_payload (transport, header.size) < 0)
++            {
++              enter_fallback (transport);
++              return -1;
++            }
++          timeout_ms = 0;
++          continue;
++        }
++
++      if (header.size != sizeof (*event) ||
++          recv_all_timeout (transport->data_fd, event, sizeof (*event),
++                            INPUT_TIMEOUT_MS) < 0)
++        {
++          enter_fallback (transport);
++          return -1;
++        }
++
++      return 1;
++    }
++}
++
++int
++meta_anland_transport_read_input_payload (MetaAnlandTransport *transport,
++                                          void                 *payload,
++                                          size_t                size,
++                                          int                   timeout_ms)
++{
++  if (!transport || transport->fallback)
++    return 0;
++  if (size == 0)
++    return 1;
++  if (size > META_ANLAND_MAX_PAYLOAD_SIZE || !payload ||
++      recv_all_timeout (transport->data_fd, payload, size,
++                                    timeout_ms) < 0)
++    {
++      enter_fallback (transport);
++      return -1;
++    }
++
++  return 1;
++}
++
++int
++meta_anland_transport_read_input_fds (MetaAnlandTransport *transport,
++                                      int                  *fds,
++                                      int                   max_fds,
++                                      int                  *n_fds,
++                                      int                   timeout_ms)
++{
++  struct data_msg header;
++
++  if (!n_fds)
++    return -1;
++  *n_fds = 0;
++  if (!transport || transport->fallback)
++    return 0;
++  if (wait_for_fd (transport->data_fd, POLLIN, timeout_ms) != 1 ||
++      recv_fds_exact (transport->data_fd, &header, sizeof (header), fds,
++                      max_fds, n_fds) < 0 ||
++      header.type != DATA_MSG_INPUT_EXTEND_FDS || header.size != 0 ||
++      *n_fds < 1)
++    {
++      close_fds (fds, *n_fds);
++      *n_fds = 0;
++      enter_fallback (transport);
++      return -1;
++    }
++
++  return 1;
++}
++
++bool
++meta_anland_transport_send_output_event (MetaAnlandTransport     *transport,
++                                         const struct OutputEvent *event,
++                                         const void               *payload,
++                                         size_t                    payload_size)
++{
++  struct data_msg header = { .type = DATA_MSG_OUTPUT_EVENT,
++                             .size = sizeof (*event) };
++  size_t size;
++  uint8_t *message;
++
++  if (!transport || !event || transport->fallback ||
++      (payload_size > 0 && !payload) ||
++      payload_size > META_ANLAND_MAX_PAYLOAD_SIZE ||
++      payload_size > SIZE_MAX - sizeof (header) - sizeof (*event))
++    return false;
++
++  size = sizeof (header) + sizeof (*event) + payload_size;
++  message = malloc (size);
++  if (!message)
++    return false;
++
++  memcpy (message, &header, sizeof (header));
++  memcpy (message + sizeof (header), event, sizeof (*event));
++  if (payload_size > 0)
++    memcpy (message + sizeof (header) + sizeof (*event), payload, payload_size);
++
++  if (send_all_timeout (transport->data_fd, message, size,
++                        INPUT_TIMEOUT_MS) < 0)
++    {
++      free (message);
++      enter_fallback (transport);
++      return false;
++    }
++
++  free (message);
++  return true;
++}
+diff --git a/src/backends/anland/vendor/meta-anland-transport.h b/src/backends/anland/vendor/meta-anland-transport.h
+new file mode 100644
+index 0000000000..79802a8200
+--- /dev/null
++++ b/src/backends/anland/vendor/meta-anland-transport.h
+@@ -0,0 +1,70 @@
++#ifndef META_ANLAND_TRANSPORT_H
++#define META_ANLAND_TRANSPORT_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "meta-anland-protocol.h"
++
++typedef struct _MetaAnlandTransport MetaAnlandTransport;
++
++#define META_ANLAND_MAX_PAYLOAD_SIZE (1024 * 1024)
++
++typedef enum
++{
++  META_ANLAND_TRANSPORT_PICKUP_READY,
++  META_ANLAND_TRANSPORT_PICKUP_NO_CONSUMER,
++  META_ANLAND_TRANSPORT_PICKUP_DAEMON_LOST = -1,
++  META_ANLAND_TRANSPORT_PICKUP_PROTOCOL_ERROR = -2,
++} MetaAnlandTransportPickupResult;
++
++int meta_anland_transport_connect (MetaAnlandTransport **transport,
++                                   const char           *socket_path);
++void meta_anland_transport_disconnect (MetaAnlandTransport *transport);
++
++bool meta_anland_transport_get_screen_info (MetaAnlandTransport *transport,
++                                            struct screen_info   *screen_info);
++
++MetaAnlandTransportPickupResult
++meta_anland_transport_try_pickup (MetaAnlandTransport *transport);
++
++bool meta_anland_transport_is_fallback (MetaAnlandTransport *transport);
++void meta_anland_transport_set_fallback_callback (MetaAnlandTransport *transport,
++                                                  void                 (*callback) (void *user_data),
++                                                  void                  *user_data);
++
++int meta_anland_transport_get_buffer_ready_fd (MetaAnlandTransport *transport);
++int meta_anland_transport_get_data_fd (MetaAnlandTransport *transport);
++int meta_anland_transport_get_audio_fd (MetaAnlandTransport *transport);
++int meta_anland_transport_get_buffer_count (MetaAnlandTransport *transport);
++int meta_anland_transport_get_selected_buffer (MetaAnlandTransport *transport);
++int meta_anland_transport_get_buffer_fd (MetaAnlandTransport *transport,
++                                         int                   index);
++bool meta_anland_transport_get_buffer_info (MetaAnlandTransport *transport,
++                                            int                   index,
++                                            struct buf_info      *buffer_info);
++
++void meta_anland_transport_set_render_fence (MetaAnlandTransport *transport,
++                                             int                   fence_fd);
++bool meta_anland_transport_notify_frame_done (MetaAnlandTransport *transport);
++
++int meta_anland_transport_poll_input_event (MetaAnlandTransport *transport,
++                                            struct InputEvent    *event,
++                                            int                   timeout_ms);
++int meta_anland_transport_read_input_payload (MetaAnlandTransport *transport,
++                                              void                 *payload,
++                                              size_t                size,
++                                              int                   timeout_ms);
++int meta_anland_transport_read_input_fds (MetaAnlandTransport *transport,
++                                          int                  *fds,
++                                          int                   max_fds,
++                                          int                  *n_fds,
++                                          int                   timeout_ms);
++
++bool meta_anland_transport_send_output_event (MetaAnlandTransport     *transport,
++                                              const struct OutputEvent *event,
++                                              const void               *payload,
++                                              size_t                    payload_size);
++
++#endif /* META_ANLAND_TRANSPORT_H */
+diff --git a/src/tests/anland-transport-tests.c b/src/tests/anland-transport-tests.c
+new file mode 100644
+index 0000000000..0e17cec208
+--- /dev/null
++++ b/src/tests/anland-transport-tests.c
+@@ -0,0 +1,419 @@
++#include <errno.h>
++#include <fcntl.h>
++#include <glib.h>
++#include <glib/gstdio.h>
++#include <stdint.h>
++#include <string.h>
++#include <sys/eventfd.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++#include "meta-anland-socket-utils.h"
++#include "meta-anland-transport.h"
++
++_Static_assert (sizeof (struct ctrl_msg) == 8,
++                "Anland control header ABI changed");
++_Static_assert (sizeof (struct data_msg) == 8,
++                "Anland data header ABI changed");
++_Static_assert (sizeof (struct screen_info) == 16,
++                "Anland screen info ABI changed");
++_Static_assert (sizeof (struct buf_info) == 28,
++                "Anland buffer metadata ABI changed");
++_Static_assert (sizeof (struct InputEvent) == 20,
++                "Anland input event ABI changed");
++_Static_assert (sizeof (struct OutputEvent) == 20,
++                "Anland output event ABI changed");
++_Static_assert (sizeof (struct audio_format) == 20,
++                "Anland audio format ABI changed");
++_Static_assert (sizeof (struct audio_msg) == 8,
++                "Anland audio header ABI changed");
++
++typedef struct
++{
++  int ready;
++  int fence;
++  int data;
++  int audio;
++} MockPeers;
++
++typedef struct
++{
++  int listen_fd;
++  GMutex lock;
++  MockPeers peers;
++  gboolean delay_first_pickup;
++  gboolean failed;
++} MockDaemon;
++
++static void
++close_fd (int *fd)
++{
++  if (*fd >= 0)
++    {
++      close (*fd);
++      *fd = -1;
++    }
++}
++
++static void
++close_peers (MockDaemon *daemon)
++{
++  MockPeers peers;
++
++  g_mutex_lock (&daemon->lock);
++  peers = daemon->peers;
++  daemon->peers = (MockPeers) { -1, -1, -1, -1 };
++  g_mutex_unlock (&daemon->lock);
++
++  close_fd (&peers.ready);
++  close_fd (&peers.fence);
++  close_fd (&peers.data);
++  close_fd (&peers.audio);
++}
++
++static MockPeers
++get_peers (MockDaemon *daemon)
++{
++  MockPeers peers;
++
++  g_mutex_lock (&daemon->lock);
++  peers = daemon->peers;
++  g_mutex_unlock (&daemon->lock);
++  return peers;
++}
++
++static int
++new_memfd (const char *name,
++           size_t      size)
++{
++  int fd = memfd_create (name, MFD_CLOEXEC);
++
++  if (fd < 0 || ftruncate (fd, (off_t) size) < 0)
++    {
++      close_fd (&fd);
++      return -1;
++    }
++
++  return fd;
++}
++
++static gboolean
++send_screen_info (int control_fd)
++{
++  struct ctrl_msg header = {
++    .type = CTRL_MSG_SCREEN_INFO,
++    .size = sizeof (struct screen_info),
++  };
++  struct screen_info info = {
++    .width = 1920,
++    .height = 1080,
++    .format = 1,
++    .refresh = 120000,
++  };
++
++  return meta_anland_send_all (control_fd, &header, sizeof (header)) == 0 &&
++         meta_anland_send_all (control_fd, &info, sizeof (info)) == 0;
++}
++
++static gboolean
++send_buffers (int data_fd)
++{
++  struct data_msg header = {
++    .type = DATA_MSG_BUFS_READY,
++    .size = 2 * sizeof (struct buf_info),
++  };
++  struct buf_info infos[2] = {
++    { .stride = 5120, .width = 1280, .height = 720,
++      .format = 1, .modifier = 0, .offset = 0 },
++    { .stride = 5120, .width = 1280, .height = 720,
++      .format = 1, .modifier = 0, .offset = 0 },
++  };
++  int fds[2] = {
++    new_memfd ("mutter-anland-buffer-0", 4096),
++    new_memfd ("mutter-anland-buffer-1", 4096),
++  };
++  gboolean result;
++
++  result = fds[0] >= 0 && fds[1] >= 0 &&
++           meta_anland_send_fds (data_fd, &header, sizeof (header), fds, 2) == 0 &&
++           meta_anland_send_all (data_fd, infos, sizeof (infos)) == 0;
++  close_fd (&fds[0]);
++  close_fd (&fds[1]);
++  return result;
++}
++
++static gboolean
++publish_consumer (MockDaemon *daemon,
++                  int         control_fd)
++{
++  struct ctrl_msg response = { .type = CTRL_MSG_FDS_READY, .size = 0 };
++  int ready = -1;
++  int fence[2] = { -1, -1 };
++  int data[2] = { -1, -1 };
++  int audio[2] = { -1, -1 };
++  int shm_fd = -1;
++  int producer_fds[5];
++  uint32_t selected = 1;
++  gboolean result = FALSE;
++
++  ready = eventfd (0, EFD_CLOEXEC);
++  if (ready < 0 ||
++      socketpair (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fence) < 0 ||
++      socketpair (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, data) < 0 ||
++      socketpair (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, audio) < 0)
++    goto out;
++  shm_fd = new_memfd ("mutter-anland-index", sizeof (selected));
++  if (shm_fd < 0 || pwrite (shm_fd, &selected, sizeof (selected), 0) !=
++                   (ssize_t) sizeof (selected))
++    goto out;
++
++  producer_fds[0] = ready;
++  producer_fds[1] = fence[0];
++  producer_fds[2] = data[0];
++  producer_fds[3] = shm_fd;
++  producer_fds[4] = audio[0];
++  if (meta_anland_send_fds (control_fd, &response, sizeof (response),
++                            producer_fds, G_N_ELEMENTS (producer_fds)) < 0)
++    goto out;
++
++  g_mutex_lock (&daemon->lock);
++  daemon->peers = (MockPeers) {
++    .ready = ready, .fence = fence[1], .data = data[1], .audio = audio[1],
++  };
++  g_mutex_unlock (&daemon->lock);
++  ready = fence[1] = data[1] = audio[1] = -1;
++  if (!send_buffers (get_peers (daemon).data))
++    goto out;
++  result = TRUE;
++
++out:
++  close_fd (&ready);
++  close_fd (&fence[0]);
++  close_fd (&fence[1]);
++  close_fd (&data[0]);
++  close_fd (&data[1]);
++  close_fd (&audio[0]);
++  close_fd (&audio[1]);
++  close_fd (&shm_fd);
++  if (!result)
++    close_peers (daemon);
++  return result;
++}
++
++static gpointer
++mock_daemon_thread (gpointer user_data)
++{
++  MockDaemon *daemon = user_data;
++  struct ctrl_msg request;
++  int control_fd = -1;
++
++  control_fd = accept4 (daemon->listen_fd, NULL, NULL, SOCK_CLOEXEC);
++  if (control_fd < 0 ||
++      meta_anland_recv_all (control_fd, &request, sizeof (request)) < 0 ||
++      request.type != CTRL_MSG_PRODUCER_HELLO || request.size != 0 ||
++      !send_screen_info (control_fd))
++    goto failed;
++
++  while (meta_anland_recv_all (control_fd, &request, sizeof (request)) == 0)
++    {
++      if (request.type != CTRL_MSG_PICKUP_FDS || request.size != 0)
++        goto failed;
++      if (daemon->delay_first_pickup)
++        {
++          daemon->delay_first_pickup = FALSE;
++          continue;
++        }
++      if (!publish_consumer (daemon, control_fd))
++        goto failed;
++    }
++
++  close_fd (&control_fd);
++  return NULL;
++
++failed:
++  daemon->failed = TRUE;
++  close_fd (&control_fd);
++  return NULL;
++}
++
++static int
++create_listener (const char *path)
++{
++  struct sockaddr_un address = { 0 };
++  int fd;
++
++  fd = socket (AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
++  if (fd < 0)
++    return -1;
++  address.sun_family = AF_UNIX;
++  if (strlen (path) >= sizeof (address.sun_path))
++    goto failed;
++  strcpy (address.sun_path, path);
++  if (bind (fd, (struct sockaddr *) &address, sizeof (address)) < 0 ||
++      listen (fd, 1) < 0)
++    goto failed;
++
++  return fd;
++
++failed:
++  close (fd);
++  return -1;
++}
++
++static void
++send_data_message (int         fd,
++                   uint32_t    type,
++                   const void *payload,
++                   size_t      size)
++{
++  struct data_msg header = { .type = type, .size = size };
++
++  g_assert_cmpint (meta_anland_send_all (fd, &header, sizeof (header)), ==, 0);
++  if (size > 0)
++    g_assert_cmpint (meta_anland_send_all (fd, payload, size), ==, 0);
++}
++
++static void
++fallback_callback (void *user_data)
++{
++  int *count = user_data;
++
++  (*count)++;
++}
++
++static void
++test_transport_and_reconnect (void)
++{
++  g_autoptr (GError) error = NULL;
++  g_autofree char *directory = g_dir_make_tmp ("mutter-anland-XXXXXX", &error);
++  g_autofree char *socket_path = NULL;
++  MockDaemon daemon = {
++    .listen_fd = -1,
++    .peers = { -1, -1, -1, -1 },
++    .delay_first_pickup = TRUE,
++  };
++  MetaAnlandTransport *transport = NULL;
++  struct screen_info screen_info;
++  struct InputEvent event = { 0 };
++  struct InputEvent received_event;
++  struct OutputEvent output = { 0 };
++  struct data_msg output_header;
++  struct OutputEvent received_output;
++  MockPeers peers;
++  GThread *thread;
++  char text[] = "Anland text";
++  char audio_byte = 'A';
++  char received_audio = 0;
++  char received_text[sizeof (text)] = { 0 };
++  char fence_byte = 1;
++  int fence_fds[1] = { -1 };
++  int n_fence_fds = 0;
++  int pipe_fds[2] = { -1, -1 };
++  int fallback_count = 0;
++  eventfd_t ready_value = 5;
++  eventfd_t received_ready = 0;
++
++  g_assert_no_error (error);
++  socket_path = g_build_filename (directory, "display.sock", NULL);
++  daemon.listen_fd = create_listener (socket_path);
++  if (daemon.listen_fd < 0)
++    g_error ("failed to create mock Anland socket %s: %s",
++             socket_path, g_strerror (errno));
++  g_assert_cmpint (daemon.listen_fd, >=, 0);
++  g_mutex_init (&daemon.lock);
++  thread = g_thread_new ("anland-mock-daemon", mock_daemon_thread, &daemon);
++
++  g_assert_cmpint (meta_anland_transport_connect (&transport, socket_path), ==, 0);
++  g_assert_true (meta_anland_transport_get_screen_info (transport, &screen_info));
++  g_assert_cmpuint (screen_info.refresh, ==, 120000);
++  g_assert_cmpint (meta_anland_transport_try_pickup (transport), ==,
++                   META_ANLAND_TRANSPORT_PICKUP_NO_CONSUMER);
++  g_assert_cmpint (meta_anland_transport_try_pickup (transport), ==,
++                   META_ANLAND_TRANSPORT_PICKUP_READY);
++  g_assert_false (meta_anland_transport_is_fallback (transport));
++  g_assert_cmpint (meta_anland_transport_get_buffer_count (transport), ==, 2);
++  g_assert_cmpint (meta_anland_transport_get_selected_buffer (transport), ==, 1);
++  g_assert_cmpint (meta_anland_transport_get_buffer_fd (transport, 0), >=, 0);
++
++  peers = get_peers (&daemon);
++  g_assert_cmpint (eventfd_write (peers.ready, ready_value), ==, 0);
++  g_assert_cmpint (eventfd_read (meta_anland_transport_get_buffer_ready_fd (transport),
++                                 &received_ready), ==, 0);
++  g_assert_cmpuint (received_ready, ==, ready_value);
++  g_assert_cmpint (send (peers.audio, &audio_byte, sizeof (audio_byte), 0), ==, 1);
++  g_assert_cmpint (recv (meta_anland_transport_get_audio_fd (transport),
++                         &received_audio, sizeof (received_audio), 0), ==, 1);
++  g_assert_cmpint (received_audio, ==, audio_byte);
++
++  send_data_message (peers.data, 0xfeed, text, sizeof (text));
++  event.type = INPUT_TYPE_TEXT_INPUT;
++  event.text_input.size = sizeof (text);
++  send_data_message (peers.data, DATA_MSG_INPUT_EVENT, &event, sizeof (event));
++  g_assert_cmpint (meta_anland_send_all (peers.data, text, sizeof (text)), ==, 0);
++  g_assert_cmpint (meta_anland_transport_poll_input_event (transport, &received_event, 100), ==, 1);
++  g_assert_cmpuint (received_event.type, ==, INPUT_TYPE_TEXT_INPUT);
++  g_assert_cmpint (meta_anland_transport_read_input_payload (transport, received_text,
++                                                              sizeof (received_text), 100), ==, 1);
++  g_assert_cmpmem (received_text, sizeof (received_text), text, sizeof (text));
++
++  output.type = OUTPUT_TYPE_CLIPBOARD;
++  output.clipboard.size = sizeof (text);
++  g_assert_true (meta_anland_transport_send_output_event (transport, &output,
++                                                           text, sizeof (text)));
++  g_assert_cmpint (meta_anland_recv_all (peers.data, &output_header,
++                                         sizeof (output_header)), ==, 0);
++  g_assert_cmpuint (output_header.type, ==, DATA_MSG_OUTPUT_EVENT);
++  g_assert_cmpint (meta_anland_recv_all (peers.data, &received_output,
++                                         sizeof (received_output)), ==, 0);
++  g_assert_cmpuint (output_header.size, ==, sizeof (received_output));
++  g_assert_cmpuint (received_output.type, ==, OUTPUT_TYPE_CLIPBOARD);
++  g_assert_cmpint (meta_anland_recv_all (peers.data, received_text,
++                                         sizeof (received_text)), ==, 0);
++  g_assert_cmpmem (received_text, sizeof (received_text), text, sizeof (text));
++
++  g_assert_cmpint (pipe2 (pipe_fds, O_CLOEXEC), ==, 0);
++  meta_anland_transport_set_render_fence (transport, pipe_fds[0]);
++  pipe_fds[0] = -1;
++  g_assert_true (meta_anland_transport_notify_frame_done (transport));
++  g_assert_cmpint (meta_anland_recv_fds (peers.fence, &fence_byte,
++                                         sizeof (fence_byte), fence_fds, 1,
++                                         &n_fence_fds), ==, 1);
++  g_assert_cmpint (fence_byte, ==, 0);
++  g_assert_cmpint (n_fence_fds, ==, 1);
++  close_fd (&fence_fds[0]);
++  close_fd (&pipe_fds[1]);
++
++  meta_anland_transport_set_fallback_callback (transport, fallback_callback,
++                                                &fallback_count);
++  g_mutex_lock (&daemon.lock);
++  close_fd (&daemon.peers.data);
++  g_mutex_unlock (&daemon.lock);
++  g_assert_cmpint (meta_anland_transport_poll_input_event (transport, &event, 100), ==, -1);
++  g_assert_true (meta_anland_transport_is_fallback (transport));
++  g_assert_cmpint (fallback_count, ==, 1);
++  close_peers (&daemon);
++
++  g_assert_cmpint (meta_anland_transport_try_pickup (transport), ==,
++                   META_ANLAND_TRANSPORT_PICKUP_READY);
++  g_assert_false (meta_anland_transport_is_fallback (transport));
++  meta_anland_transport_disconnect (transport);
++  g_thread_join (thread);
++  g_assert_false (daemon.failed);
++  close_fd (&daemon.listen_fd);
++  close_peers (&daemon);
++  g_assert_cmpint (g_unlink (socket_path), ==, 0);
++  g_assert_cmpint (g_rmdir (directory), ==, 0);
++  g_mutex_clear (&daemon.lock);
++}
++
++int
++main (int   argc,
++      char *argv[])
++{
++  g_test_init (&argc, &argv, NULL);
++  g_test_add_func ("/backends/anland/transport-and-reconnect",
++                   test_transport_and_reconnect);
++  return g_test_run ();
++}
+diff --git a/src/tests/meson.build b/src/tests/meson.build
+index 8c3773033f..20ce0cb6bc 100644
+--- a/src/tests/meson.build
++++ b/src/tests/meson.build
+@@ -142,6 +142,24 @@ gnome.compile_schemas(
+   depend_files: 'org.gnome.mutter.test.gschema.xml',
+ )
+ 
++anland_transport_test = executable('mutter-anland-transport-tests',
++  sources: [
++    'anland-transport-tests.c',
++    '../backends/anland/vendor/meta-anland-socket-utils.c',
++    '../backends/anland/vendor/meta-anland-transport.c',
++  ],
++  include_directories: [
++    tests_includes,
++    include_directories('../backends/anland/vendor'),
++  ],
++  dependencies: glib_dep,
++  install: false,
++)
++
++test('anland-transport', anland_transport_test,
++  suite: ['core', 'mutter/anland'],
++)
++
+ if have_cogl_tests
+   subdir('cogl')
+ endif

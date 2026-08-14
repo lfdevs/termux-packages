@@ -1,0 +1,33 @@
+From 8f1834047c2a74afe87533a554204e58d69c7f36 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Thu, 13 Aug 2026 13:37:24 +0800
+Subject: [PATCH] wayland: Update activation environment after session
+ initialization
+
+The standalone gnome-session-service used without a user systemd manager can finish initialization before GNOME Shell starts. Its Setenv request then returns NotInInitialization, leaving the D-Bus activation environment without DISPLAY or XAUTHORITY. D-Bus-activated applications such as Ptyxis therefore cannot launch X11 clients.
+
+Treat that response like an unavailable session manager and update the D-Bus activation environment directly. Normal session-manager initialization remains unchanged, while later D-Bus activations receive the Xwayland environment.
+
+diff --git a/src/wayland/meta-wayland.c b/src/wayland/meta-wayland.c
+index f2f3775eed..8013438c44 100644
+--- a/src/wayland/meta-wayland.c
++++ b/src/wayland/meta-wayland.c
+@@ -761,11 +761,13 @@ set_gnome_env (const char *name,
+       g_autofree char *remote_error = NULL;
+ 
+       remote_error = g_dbus_error_get_remote_error (error);
+-      if (g_strcmp0 (remote_error, "org.freedesktop.DBus.Error.NameHasNoOwner") == 0)
++      if (g_strcmp0 (remote_error, "org.freedesktop.DBus.Error.NameHasNoOwner") == 0 ||
++          g_strcmp0 (remote_error,
++                     "org.gnome.SessionManager.NotInInitialization") == 0)
+         {
+           return update_activation_environment (session_bus, name, value);
+         }
+-      else if (g_strcmp0 (remote_error, "org.gnome.SessionManager.NotInInitialization") != 0)
++      else
+         {
+           g_warning ("Failed to set environment variable %s for gnome-session: %s",
+                      name, error->message);
+-- 
+2.47.3
+

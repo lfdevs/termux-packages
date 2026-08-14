@@ -1,0 +1,29 @@
+From 1d33cd80ab5d3c5b5bb17a1f68ad2463c4273aab Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Tue, 11 Aug 2026 11:57:15 +0800
+Subject: [PATCH] third-party/xcursor: Search the configured icon directory
+
+The embedded Xcursor loader otherwise only searches /usr/share/icons, which misses themes installed under Termux's prefix and leaves Wayland pointers as the translucent fallback cursor. Pass the configured icon and pixmap directories to every target that compiles the embedded loader.
+---
+ src/third_party/meson.build | 12 +++++++++++-
+ 1 file changed, 11 insertions(+), 1 deletion(-)
+
+diff --git a/src/third_party/meson.build b/src/third_party/meson.build
+index db4d0e2999..849409047a 100644
+--- a/src/third_party/meson.build
++++ b/src/third_party/meson.build
+@@ -5,0 +6,9 @@ xcursor_includes = include_directories('xcursor')
++
++xcursor_path = '~/.local/share/icons:~/.icons:@0@:@1@:/usr/share/icons:/usr/share/pixmaps:/usr/X11R6/lib/X11/icons'.format(
++  datadir / 'icons',
++  datadir / 'pixmaps',
++)
++xcursor_path_c_args = [
++  '-DXCURSORPATH="@0@"'.format(xcursor_path),
++]
++
+@@ -8 +17 @@ xcursor_static_lib = static_library('xcursor',
+-  c_args: mutter_c_args,
++  c_args: mutter_c_args + xcursor_path_c_args,
+@@ -16,0 +26 @@ xcursor_static_dep = declare_dependency(
++  compile_args: xcursor_path_c_args,

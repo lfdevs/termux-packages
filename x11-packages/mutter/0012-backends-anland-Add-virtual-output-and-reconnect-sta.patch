@@ -1,0 +1,483 @@
+From 1b68d61ed9339372a8e83bb585ded63943d8d04d Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 2 Aug 2026 09:14:08 +0800
+Subject: [PATCH 12/27] backends/anland: Add virtual output and reconnect state
+
+Create the persistent Anland-1 virtual monitor from valid consumer screen
+information and retain it through fallback. Reconnect consumer-only resources
+with a bounded source while retaining a placeholder framebuffer.
+
+Use the consumer buffer dimensions as authoritative when applying a mode
+change, including a surface recreation or runtime refresh transition.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0003-backends-anland-Add-virtual-output-and-reconnect-state.patch
+
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index ed710d3304..1f7747ace5 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -4,19 +4,295 @@
+ 
+ #include "backends/anland/meta-backend-anland.h"
+ 
++#include "backends/anland/vendor/meta-anland-transport.h"
++#include "backends/meta-monitor-manager-private.h"
++#include "backends/meta-virtual-monitor.h"
++#include "meta/meta-backend.h"
++
++#define ANLAND_RECONNECT_INTERVAL_MS 200
++
++enum
++{
++  PROP_0,
++
++  PROP_ANLAND_SOCKET,
++};
++
+ struct _MetaBackendAnland
+ {
+   MetaBackendNative parent;
++
++  char *socket_path;
++  MetaAnlandTransport *transport;
++  MetaVirtualMonitor *virtual_monitor;
++  struct screen_info screen_info;
++  guint reconnect_source_id;
+ };
+ 
+ G_DEFINE_TYPE (MetaBackendAnland, meta_backend_anland, META_TYPE_BACKEND_NATIVE)
+ 
++static char *
++get_default_socket_path (void)
++{
++  const char *socket_path = g_getenv ("ANLAND_SOCKET");
++  const char *tmpdir;
++  const char *prefix;
++
++  if (socket_path && *socket_path)
++    return g_strdup (socket_path);
++
++  tmpdir = g_getenv ("TMPDIR");
++  if (tmpdir && *tmpdir)
++    return g_build_filename (tmpdir, "anland", "display_daemon.sock", NULL);
++
++  prefix = g_getenv ("PREFIX");
++  if (prefix && g_str_has_prefix (prefix, "/data/data/com.termux/"))
++    return g_strdup ("/data/data/com.termux/files/usr/tmp/anland/display_daemon.sock");
++
++  return g_strdup ("/tmp/anland/display_daemon.sock");
++}
++
++static gboolean
++validate_screen_info (const struct screen_info  *screen_info,
++                      GError                   **error)
++{
++  if (screen_info->width == 0 || screen_info->height == 0 ||
++      screen_info->width > G_MAXINT || screen_info->height > G_MAXINT ||
++      (screen_info->refresh != 0 && screen_info->refresh < 1000) ||
++      screen_info->refresh > 1000000)
++    {
++      if (error)
++        g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
++                     "Anland daemon provided invalid screen information");
++      return FALSE;
++    }
++
++  return TRUE;
++}
++
++static void
++clear_transport (MetaBackendAnland *backend)
++{
++  if (backend->transport)
++    meta_anland_transport_disconnect (backend->transport);
++  backend->transport = NULL;
++}
++
++static gboolean
++connect_transport (MetaBackendAnland  *backend,
++                   GError            **error)
++{
++  struct screen_info screen_info;
++
++  if (backend->transport)
++    return TRUE;
++
++  if (meta_anland_transport_connect (&backend->transport,
++                                     backend->socket_path) < 0)
++    {
++      if (error)
++        g_set_error (error, G_IO_ERROR, G_IO_ERROR_CONNECTION_REFUSED,
++                     "Failed to connect to Anland daemon at %s",
++                     backend->socket_path);
++      return FALSE;
++    }
++
++  if (!meta_anland_transport_get_screen_info (backend->transport, &screen_info) ||
++      !validate_screen_info (&screen_info, error))
++    {
++      clear_transport (backend);
++      return FALSE;
++    }
++
++  backend->screen_info = screen_info;
++  return TRUE;
++}
++
++static gboolean
++update_virtual_monitor (MetaBackendAnland  *backend,
++                        GError            **error)
++{
++  MetaMonitorManager *monitor_manager;
++  float refresh_rate;
++
++  if (!backend->transport)
++    return FALSE;
++
++  monitor_manager = meta_backend_get_monitor_manager (META_BACKEND (backend));
++  refresh_rate = backend->screen_info.refresh > 0 ?
++    backend->screen_info.refresh / 1000.0f : 60.0f;
++
++  if (backend->virtual_monitor)
++    {
++      meta_virtual_monitor_set_mode (backend->virtual_monitor,
++                                     backend->screen_info.width,
++                                     backend->screen_info.height,
++                                     refresh_rate);
++      meta_monitor_manager_reload (monitor_manager);
++      return TRUE;
++    }
++
++  g_autoptr (MetaVirtualMonitorInfo) info =
++    meta_virtual_monitor_info_new (backend->screen_info.width,
++                                   backend->screen_info.height,
++                                   refresh_rate,
++                                   "Anland", "Anland-1", "Anland-1");
++  backend->virtual_monitor =
++    meta_monitor_manager_create_virtual_monitor (monitor_manager, info, error);
++  if (!backend->virtual_monitor)
++    return FALSE;
++
++  meta_monitor_manager_reload (monitor_manager);
++  return TRUE;
++}
++
++static gboolean reconnect_cb (gpointer user_data);
++
++static void
++schedule_reconnect (MetaBackendAnland *backend)
++{
++  if (backend->reconnect_source_id)
++    return;
++
++  backend->reconnect_source_id =
++    g_timeout_add (ANLAND_RECONNECT_INTERVAL_MS, reconnect_cb, backend);
++}
++
++static void
++on_transport_fallback (void *user_data)
++{
++  MetaBackendAnland *backend = user_data;
++
++  schedule_reconnect (backend);
++}
++
++static gboolean
++reconnect_cb (gpointer user_data)
++{
++  MetaBackendAnland *backend = META_BACKEND_ANLAND (user_data);
++  MetaAnlandTransportPickupResult pickup_result;
++
++  if (!backend->transport)
++    {
++      if (!connect_transport (backend, NULL))
++        return G_SOURCE_CONTINUE;
++      if (!update_virtual_monitor (backend, NULL))
++        {
++          clear_transport (backend);
++          return G_SOURCE_CONTINUE;
++        }
++      meta_anland_transport_set_fallback_callback (backend->transport,
++                                                    on_transport_fallback,
++                                                    backend);
++    }
++
++  pickup_result = meta_anland_transport_try_pickup (backend->transport);
++  switch (pickup_result)
++    {
++    case META_ANLAND_TRANSPORT_PICKUP_READY:
++      backend->reconnect_source_id = 0;
++      return G_SOURCE_REMOVE;
++    case META_ANLAND_TRANSPORT_PICKUP_NO_CONSUMER:
++      return G_SOURCE_CONTINUE;
++    case META_ANLAND_TRANSPORT_PICKUP_DAEMON_LOST:
++    case META_ANLAND_TRANSPORT_PICKUP_PROTOCOL_ERROR:
++      clear_transport (backend);
++      return G_SOURCE_CONTINUE;
++    }
++
++  g_assert_not_reached ();
++}
++
++static gboolean
++meta_backend_anland_init_post (MetaBackend  *backend,
++                               GError      **error)
++{
++  MetaBackendClass *parent_class =
++    META_BACKEND_CLASS (meta_backend_anland_parent_class);
++  MetaBackendAnland *backend_anland = META_BACKEND_ANLAND (backend);
++
++  if (!parent_class->init_post (backend, error))
++    return FALSE;
++
++  if (!connect_transport (backend_anland, error))
++    return FALSE;
++
++  meta_anland_transport_set_fallback_callback (backend_anland->transport,
++                                                on_transport_fallback,
++                                                backend_anland);
++  return TRUE;
++}
++
++static void
++meta_backend_anland_set_property (GObject      *object,
++                                  guint         prop_id,
++                                  const GValue *value,
++                                  GParamSpec   *pspec)
++{
++  MetaBackendAnland *backend = META_BACKEND_ANLAND (object);
++
++  switch (prop_id)
++    {
++    case PROP_ANLAND_SOCKET:
++      if (g_value_get_string (value))
++        {
++          g_free (backend->socket_path);
++          backend->socket_path = g_value_dup_string (value);
++        }
++      break;
++    default:
++      G_OBJECT_CLASS (meta_backend_anland_parent_class)->set_property (object,
++                                                                        prop_id,
++                                                                        value,
++                                                                        pspec);
++      break;
++    }
++}
++
++static void
++meta_backend_anland_dispose (GObject *object)
++{
++  MetaBackendAnland *backend = META_BACKEND_ANLAND (object);
++
++  g_clear_handle_id (&backend->reconnect_source_id, g_source_remove);
++  g_clear_object (&backend->virtual_monitor);
++  clear_transport (backend);
++  g_clear_pointer (&backend->socket_path, g_free);
++
++  G_OBJECT_CLASS (meta_backend_anland_parent_class)->dispose (object);
++}
++
+ static void
+ meta_backend_anland_class_init (MetaBackendAnlandClass *klass)
+ {
++  GObjectClass *object_class = G_OBJECT_CLASS (klass);
++  MetaBackendClass *backend_class = META_BACKEND_CLASS (klass);
++
++  object_class->set_property = meta_backend_anland_set_property;
++  object_class->dispose = meta_backend_anland_dispose;
++  backend_class->init_post = meta_backend_anland_init_post;
++
++  g_object_class_install_property (
++    object_class, PROP_ANLAND_SOCKET,
++    g_param_spec_string ("anland-socket", NULL, NULL, NULL,
++                         G_PARAM_WRITABLE |
++                         G_PARAM_CONSTRUCT_ONLY |
++                         G_PARAM_STATIC_STRINGS));
+ }
+ 
+ static void
+ meta_backend_anland_init (MetaBackendAnland *backend_anland)
+ {
++  backend_anland->socket_path = get_default_socket_path ();
++}
++
++gboolean
++meta_backend_anland_setup (MetaBackendAnland  *backend,
++                           GError            **error)
++{
++  if (!update_virtual_monitor (backend, error))
++    return FALSE;
++
++  schedule_reconnect (backend);
++  return TRUE;
+ }
+diff --git a/src/backends/anland/meta-backend-anland.h b/src/backends/anland/meta-backend-anland.h
+index 746e550941..e5987ca74b 100644
+--- a/src/backends/anland/meta-backend-anland.h
++++ b/src/backends/anland/meta-backend-anland.h
+@@ -9,3 +9,6 @@ G_DECLARE_FINAL_TYPE (MetaBackendAnland,
+                       meta_backend_anland,
+                       META, BACKEND_ANLAND,
+                       MetaBackendNative)
++
++gboolean meta_backend_anland_setup (MetaBackendAnland  *backend,
++                                    GError            **error);
+diff --git a/src/backends/anland/vendor/meta-anland-transport.c b/src/backends/anland/vendor/meta-anland-transport.c
+index a5ef702dfc..785047fb23 100644
+--- a/src/backends/anland/vendor/meta-anland-transport.c
++++ b/src/backends/anland/vendor/meta-anland-transport.c
+@@ -12,6 +12,7 @@
+ #include <unistd.h>
+ 
+ #define HANDSHAKE_TIMEOUT_MS 100
++#define INITIAL_HANDSHAKE_TIMEOUT_MS 5000
+ #define INPUT_TIMEOUT_MS 100
+ 
+ struct _MetaAnlandTransport
+@@ -327,6 +328,7 @@ meta_anland_transport_connect (MetaAnlandTransport **out_transport,
+   struct ctrl_msg request = { .type = CTRL_MSG_PRODUCER_HELLO, .size = 0 };
+   struct ctrl_msg response;
+   struct screen_info screen_info;
++  int wait_result;
+ 
+   if (!out_transport || !socket_path)
+     return -1;
+@@ -350,23 +352,29 @@ meta_anland_transport_connect (MetaAnlandTransport **out_transport,
+   transport->control_fd = meta_anland_connect_unix (socket_path);
+   if (transport->control_fd < 0 ||
+       meta_anland_send_all (transport->control_fd, &request,
+-                            sizeof (request)) < 0 ||
+-      meta_anland_recv_all (transport->control_fd, &response,
+-                            sizeof (response)) < 0 ||
++                            sizeof (request)) < 0)
++    goto failed;
++
++  wait_result = wait_for_fd (transport->control_fd, POLLIN,
++                             INITIAL_HANDSHAKE_TIMEOUT_MS);
++  if (wait_result != 1 ||
++      recv_all_timeout (transport->control_fd, &response, sizeof (response),
++                        INITIAL_HANDSHAKE_TIMEOUT_MS) < 0 ||
+       response.type != CTRL_MSG_SCREEN_INFO ||
+       response.size != sizeof (screen_info) ||
+-      meta_anland_recv_all (transport->control_fd, &screen_info,
+-                            sizeof (screen_info)) < 0)
+-    {
+-      if (transport->control_fd >= 0)
+-        close (transport->control_fd);
+-      free (transport);
+-      return -1;
+-    }
++      recv_all_timeout (transport->control_fd, &screen_info,
++                        sizeof (screen_info), INITIAL_HANDSHAKE_TIMEOUT_MS) < 0)
++    goto failed;
+ 
+   transport->screen_info = screen_info;
+   *out_transport = transport;
+   return 0;
++
++failed:
++  if (transport->control_fd >= 0)
++    close (transport->control_fd);
++  free (transport);
++  return -1;
+ }
+ 
+ void
+diff --git a/src/core/meta-context-main.c b/src/core/meta-context-main.c
+index 4acb9bce97..cbe9d17e3b 100644
+--- a/src/core/meta-context-main.c
++++ b/src/core/meta-context-main.c
+@@ -81,6 +81,7 @@ typedef struct _MetaContextMainOptions
+ #endif
+ #ifdef HAVE_ANLAND
+   gboolean anland;
++  char *anland_socket;
+ #endif
+   char *trace_file;
+   gboolean debug_control;
+@@ -159,6 +160,14 @@ check_configuration (MetaContextMain  *context_main,
+ #endif /* HAVE_NATIVE_BACKEND */
+ 
+ #ifdef HAVE_ANLAND
++  if (context_main->options.anland_socket &&
++      !context_main->options.anland)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
++                   "--anland-socket requires --anland");
++      return FALSE;
++    }
++
+   if (context_main->options.anland &&
+       (context_main->options.display_server ||
+        context_main->options.headless
+@@ -489,6 +498,13 @@ meta_context_main_setup (MetaContext  *context,
+     }
+ #endif
+ 
++#ifdef HAVE_ANLAND
++  if (context_main->options.anland &&
++      !meta_backend_anland_setup (
++        META_BACKEND_ANLAND (meta_context_get_backend (context)), error))
++    return FALSE;
++#endif
++
+   return TRUE;
+ }
+ 
+@@ -542,6 +558,18 @@ static MetaBackend *
+ create_anland_backend (MetaContext  *context,
+                        GError      **error)
+ {
++  MetaContextMain *context_main = META_CONTEXT_MAIN (context);
++
++  if (context_main->options.anland_socket)
++    {
++      return g_initable_new (META_TYPE_BACKEND_ANLAND,
++                             NULL, error,
++                             "context", context,
++                             "mode", META_BACKEND_NATIVE_MODE_HEADLESS,
++                             "anland-socket", context_main->options.anland_socket,
++                             NULL);
++    }
++
+   return g_initable_new (META_TYPE_BACKEND_ANLAND,
+                          NULL, error,
+                          "context", context,
+@@ -746,6 +774,12 @@ meta_context_main_add_option_entries (MetaContextMain *context_main)
+       &context_main->options.anland,
+       N_("Run with the Anland display backend")
+     },
++    {
++      "anland-socket", 0, 0, G_OPTION_ARG_FILENAME,
++      &context_main->options.anland_socket,
++      N_("Specify Anland display daemon socket"),
++      "PATH"
++    },
+ #endif
+     {
+       "virtual-monitor", 0, 0, G_OPTION_ARG_CALLBACK,
+@@ -811,6 +845,7 @@ meta_context_main_finalize (GObject *object)
+ #ifdef HAVE_NATIVE_BACKEND
+   MetaContextMain *context_main = META_CONTEXT_MAIN (object);
+ 
++  g_clear_pointer (&context_main->options.anland_socket, g_free);
+   g_list_free_full (context_main->persistent_virtual_monitors, g_object_unref);
+   context_main->persistent_virtual_monitors = NULL;
+ 
+diff --git a/src/meson.build b/src/meson.build
+index 65d6314b72..2fc372b617 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -927,6 +927,10 @@ if have_anland
+   mutter_sources += [
+     'backends/anland/meta-backend-anland.c',
+     'backends/anland/meta-backend-anland.h',
++    'backends/anland/vendor/meta-anland-socket-utils.c',
++    'backends/anland/vendor/meta-anland-socket-utils.h',
++    'backends/anland/vendor/meta-anland-transport.c',
++    'backends/anland/vendor/meta-anland-transport.h',
+   ]
+ endif
+ 

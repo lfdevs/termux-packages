@@ -1,0 +1,62 @@
+From ee74e33cdbda4e9a364ad0c4f1a769d94d181db7 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Tue, 4 Aug 2026 02:59:29 +0800
+Subject: [PATCH 19/27] backends/anland: Release StageView before mode changes
+
+A virtual monitor mode change rebuilds renderer views and disposes the old
+StageView and frame clock. Anland retained the disposed view and tried to
+uninhibit its cleared frame clock while reconnecting, crashing GNOME Shell
+after the consumer surface changed size.
+
+Release Anland's inactive consumer view before setting the new mode, then
+reload the monitor manager so the current monitor state, logical monitor, and
+renderer view adopt the new dimensions. The reconnect timer can then bind the
+replacement consumer buffers after the view rebuild.
+
+This prevents stale frame-clock access without leaving the renderer view at
+the old size and showing a black screen after a resize.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0010-backends-anland-Release-StageView-before-mode-changes.patch
+
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index 1b2b18cb70..ebe09f55f1 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -73,6 +73,7 @@ struct _MetaBackendAnland
+ G_DEFINE_TYPE (MetaBackendAnland, meta_backend_anland, META_TYPE_BACKEND_NATIVE)
+ 
+ static void deactivate_consumer (MetaBackendAnland *backend);
++static void release_stage_view (MetaBackendAnland *backend);
+ static void schedule_reconnect (MetaBackendAnland *backend);
+ 
+ static void
+@@ -338,6 +339,7 @@ update_virtual_monitor (MetaBackendAnland  *backend,
+ 
+   if (backend->virtual_monitor)
+     {
++      release_stage_view (backend);
+       meta_virtual_monitor_set_mode (backend->virtual_monitor,
+                                      backend->screen_info.width,
+                                      backend->screen_info.height,
+@@ -382,6 +384,20 @@ uninhibit_frame_clock (MetaBackendAnland *backend)
+   backend->frame_clock_inhibited = FALSE;
+ }
+ 
++static void
++release_stage_view (MetaBackendAnland *backend)
++{
++  if (!backend->stage_view)
++    return;
++
++  g_return_if_fail (!backend->consumer_active);
++  g_return_if_fail (!backend->frame_pending);
++
++  uninhibit_frame_clock (backend);
++  g_clear_object (&backend->placeholder_framebuffer);
++  g_clear_object (&backend->stage_view);
++}
++
+ static MetaStageView *
+ find_stage_view (MetaBackendAnland *backend)
+ {

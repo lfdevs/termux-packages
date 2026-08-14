@@ -1,0 +1,696 @@
+From c00fe32609cb106ef308412d0623676815381d1c Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 2 Aug 2026 09:37:58 +0800
+Subject: [PATCH 13/27] backends/anland: Render directly into consumer buffers
+
+Import the current Anland dma-buf handoff as linear ABGR8888 Cogl framebuffers and render directly into the consumer-selected buffer. Validate untrusted layouts and modifier support before importing them, and make unknown formats recoverable errors.
+
+Add a private StageView offscreen-present hook. It drives the consumer-paced frame clock, delivers native fence fds when available, falls back to synchronous rendering otherwise, and defers software presentation until the next buffer-ready signal.
+
+Tear down the GSource and external framebuffers before the transport closes consumer descriptors, keeping the existing placeholder framebuffer active during fallback.
+
+Gbp-Pq: Topic anland
+Gbp-Pq: Name 0004-backends-anland-Render-directly-into-consumer-buffers.patch
+
+diff --git a/clutter/clutter/clutter-stage-view-private.h b/clutter/clutter/clutter-stage-view-private.h
+index 31ac7e144e..246bb5afc2 100644
+--- a/clutter/clutter/clutter-stage-view-private.h
++++ b/clutter/clutter/clutter-stage-view-private.h
+@@ -21,6 +21,11 @@
+ #include "clutter/clutter-types.h"
+ #include "mtk/mtk.h"
+ 
++typedef gboolean (* MetaStageViewPresentFunc) (ClutterStageView *view,
++                                                ClutterFrame     *frame,
++                                                int64_t           global_frame_counter,
++                                                gpointer          user_data);
++
+ CLUTTER_EXPORT
+ void clutter_stage_view_after_paint (ClutterStageView *view,
+                                      MtkRegion        *redraw_clip);
+@@ -46,6 +51,20 @@ void clutter_stage_view_invalidate_projection (ClutterStageView *view);
+ void clutter_stage_view_set_projection (ClutterStageView        *view,
+                                         const graphene_matrix_t *matrix);
+ 
++CLUTTER_EXPORT
++void clutter_stage_view_replace_framebuffer (ClutterStageView *view,
++                                              CoglFramebuffer  *framebuffer);
++
++CLUTTER_EXPORT
++void clutter_stage_view_set_present_func (ClutterStageView        *view,
++                                           MetaStageViewPresentFunc present_func,
++                                           gpointer                 user_data);
++
++CLUTTER_EXPORT
++gboolean clutter_stage_view_present (ClutterStageView *view,
++                                      ClutterFrame     *frame,
++                                      int64_t           global_frame_counter);
++
+ CLUTTER_EXPORT
+ void clutter_stage_view_add_redraw_clip (ClutterStageView   *view,
+                                          const MtkRectangle *clip);
+diff --git a/clutter/clutter/clutter-stage-view.c b/clutter/clutter/clutter-stage-view.c
+index 823e9fb63e..fe6ffd0cf1 100644
+--- a/clutter/clutter/clutter-stage-view.c
++++ b/clutter/clutter/clutter-stage-view.c
+@@ -90,6 +90,9 @@ typedef struct _ClutterStageViewPrivate
+   gboolean has_accumulated_redraw_clip;
+   MtkRegion *accumulated_redraw_clip;
+ 
++  MetaStageViewPresentFunc present_func;
++  gpointer present_user_data;
++
+   float refresh_rate;
+   int64_t vblank_duration_us;
+   ClutterFrameClock *frame_clock;
+@@ -1207,6 +1210,51 @@ clutter_stage_view_set_framebuffer (ClutterStageView *view,
+     }
+ }
+ 
++void
++clutter_stage_view_replace_framebuffer (ClutterStageView *view,
++                                        CoglFramebuffer  *framebuffer)
++{
++  ClutterStageViewPrivate *priv =
++    clutter_stage_view_get_instance_private (view);
++
++  g_return_if_fail (framebuffer != NULL);
++  g_return_if_fail (cogl_framebuffer_get_width (priv->framebuffer) ==
++                    cogl_framebuffer_get_width (framebuffer));
++  g_return_if_fail (cogl_framebuffer_get_height (priv->framebuffer) ==
++                    cogl_framebuffer_get_height (framebuffer));
++
++  g_set_object (&priv->framebuffer, framebuffer);
++  clutter_stage_view_invalidate_viewport (view);
++  clutter_stage_view_invalidate_projection (view);
++}
++
++void
++clutter_stage_view_set_present_func (ClutterStageView        *view,
++                                     MetaStageViewPresentFunc present_func,
++                                     gpointer                 user_data)
++{
++  ClutterStageViewPrivate *priv =
++    clutter_stage_view_get_instance_private (view);
++
++  priv->present_func = present_func;
++  priv->present_user_data = user_data;
++}
++
++gboolean
++clutter_stage_view_present (ClutterStageView *view,
++                            ClutterFrame     *frame,
++                            int64_t           global_frame_counter)
++{
++  ClutterStageViewPrivate *priv =
++    clutter_stage_view_get_instance_private (view);
++
++  if (!priv->present_func)
++    return FALSE;
++
++  return priv->present_func (view, frame, global_frame_counter,
++                             priv->present_user_data);
++}
++
+ static void
+ clutter_stage_view_set_transform (ClutterStageView    *view,
+                                   MtkMonitorTransform  transform)
+diff --git a/src/backends/anland/meta-backend-anland.c b/src/backends/anland/meta-backend-anland.c
+index 1f7747ace5..3f491b1768 100644
+--- a/src/backends/anland/meta-backend-anland.c
++++ b/src/backends/anland/meta-backend-anland.c
+@@ -5,11 +5,24 @@
+ #include "backends/anland/meta-backend-anland.h"
+ 
+ #include "backends/anland/vendor/meta-anland-transport.h"
++#include "backends/meta-backend-private.h"
++#include "backends/meta-fd-source.h"
+ #include "backends/meta-monitor-manager-private.h"
++#include "backends/meta-renderer.h"
++#include "backends/meta-renderer-view.h"
++#include "backends/meta-stage-view-private.h"
+ #include "backends/meta-virtual-monitor.h"
++#include "backends/native/meta-renderer-native-private.h"
+ #include "meta/meta-backend.h"
+ 
++#include <drm_fourcc.h>
++#include <fcntl.h>
++#include <sys/eventfd.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
+ #define ANLAND_RECONNECT_INTERVAL_MS 200
++#define ANLAND_PROTOCOL_FORMAT_RGBA_8888 1
+ 
+ enum
+ {
+@@ -27,10 +40,25 @@ struct _MetaBackendAnland
+   MetaVirtualMonitor *virtual_monitor;
+   struct screen_info screen_info;
+   guint reconnect_source_id;
++
++  GSource *buffer_ready_source;
++  MetaStageView *stage_view;
++  CoglFramebuffer *placeholder_framebuffer;
++  CoglFramebuffer *buffer_framebuffers[MAX_BUFS];
++  int current_buffer;
++  gboolean consumer_active;
++  gboolean frame_clock_inhibited;
++  gboolean frame_pending;
++  gboolean warned_sync_fallback;
++  int64_t pending_global_frame_counter;
++  int64_t pending_view_frame_counter;
++  unsigned int presentation_sequence;
+ };
+ 
+ G_DEFINE_TYPE (MetaBackendAnland, meta_backend_anland, META_TYPE_BACKEND_NATIVE)
+ 
++static void deactivate_consumer (MetaBackendAnland *backend);
++
+ static char *
+ get_default_socket_path (void)
+ {
+@@ -73,6 +101,8 @@ validate_screen_info (const struct screen_info  *screen_info,
+ static void
+ clear_transport (MetaBackendAnland *backend)
+ {
++  deactivate_consumer (backend);
++
+   if (backend->transport)
+     meta_anland_transport_disconnect (backend->transport);
+   backend->transport = NULL;
+@@ -146,6 +176,359 @@ update_virtual_monitor (MetaBackendAnland  *backend,
+   return TRUE;
+ }
+ 
++static void
++inhibit_frame_clock (MetaBackendAnland *backend)
++{
++  if (!backend->stage_view || backend->frame_clock_inhibited)
++    return;
++
++  clutter_frame_clock_inhibit (
++    clutter_stage_view_get_frame_clock (CLUTTER_STAGE_VIEW (backend->stage_view)));
++  backend->frame_clock_inhibited = TRUE;
++}
++
++static void
++uninhibit_frame_clock (MetaBackendAnland *backend)
++{
++  if (!backend->stage_view || !backend->frame_clock_inhibited)
++    return;
++
++  clutter_frame_clock_uninhibit (
++    clutter_stage_view_get_frame_clock (CLUTTER_STAGE_VIEW (backend->stage_view)));
++  backend->frame_clock_inhibited = FALSE;
++}
++
++static MetaStageView *
++find_stage_view (MetaBackendAnland *backend)
++{
++  MetaRenderer *renderer;
++  MetaCrtc *crtc;
++  MetaRendererView *renderer_view;
++
++  if (!backend->virtual_monitor)
++    return NULL;
++
++  renderer = meta_backend_get_renderer (META_BACKEND (backend));
++  crtc = meta_virtual_monitor_get_crtc (backend->virtual_monitor);
++  renderer_view = meta_renderer_get_view_for_crtc (renderer, crtc);
++
++  return renderer_view ? META_STAGE_VIEW (renderer_view) : NULL;
++}
++
++static gboolean
++ensure_stage_view (MetaBackendAnland  *backend,
++                   GError            **error)
++{
++  MetaStageView *stage_view = find_stage_view (backend);
++
++  if (!stage_view)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_FAILED,
++                   "Anland virtual monitor does not have a renderer view yet");
++      return FALSE;
++    }
++
++  if (backend->stage_view == stage_view)
++    return TRUE;
++
++  if (backend->consumer_active || backend->frame_pending)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_BUSY,
++                   "Anland renderer view changed while a consumer was active");
++      return FALSE;
++    }
++
++  if (backend->frame_clock_inhibited)
++    uninhibit_frame_clock (backend);
++
++  g_set_object (&backend->stage_view, stage_view);
++  g_set_object (&backend->placeholder_framebuffer,
++                clutter_stage_view_get_onscreen (CLUTTER_STAGE_VIEW (stage_view)));
++  return TRUE;
++}
++
++static gboolean
++validate_buffer_info (const struct buf_info  *buffer_info,
++                      int                     fd,
++                      GError                **error)
++{
++  struct stat stat_buf;
++  uint64_t required_size;
++
++  if (buffer_info->format != ANLAND_PROTOCOL_FORMAT_RGBA_8888 ||
++      buffer_info->modifier != DRM_FORMAT_MOD_LINEAR ||
++      buffer_info->width > G_MAXUINT32 / 4u ||
++      buffer_info->stride < buffer_info->width * 4u ||
++      buffer_info->height > G_MAXUINT64 / buffer_info->stride ||
++      buffer_info->offset > G_MAXUINT64 -
++        (uint64_t) buffer_info->stride * buffer_info->height)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
++                   "Anland daemon provided an invalid dma-buf description");
++      return FALSE;
++    }
++
++  required_size = buffer_info->offset +
++    (uint64_t) buffer_info->stride * buffer_info->height;
++  if (fstat (fd, &stat_buf) == 0 && stat_buf.st_size > 0 &&
++      required_size > (uint64_t) stat_buf.st_size)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
++                   "Anland dma-buf is smaller than its advertised layout");
++      return FALSE;
++    }
++
++  return TRUE;
++}
++
++static void
++complete_pending_frame (MetaBackendAnland *backend)
++{
++  ClutterFrameInfo frame_info;
++
++  if (!backend->stage_view || !backend->frame_pending)
++    return;
++
++  frame_info = (ClutterFrameInfo) {
++    .global_frame_counter = backend->pending_global_frame_counter,
++    .view_frame_counter = backend->pending_view_frame_counter,
++    .refresh_rate = clutter_stage_view_get_refresh_rate (
++      CLUTTER_STAGE_VIEW (backend->stage_view)),
++    .presentation_time = g_get_monotonic_time (),
++    .flags = CLUTTER_FRAME_INFO_FLAG_NONE,
++    .sequence = ++backend->presentation_sequence,
++  };
++  clutter_stage_view_notify_presented (CLUTTER_STAGE_VIEW (backend->stage_view),
++                                       &frame_info);
++  backend->frame_pending = FALSE;
++}
++
++static void
++deactivate_consumer (MetaBackendAnland *backend)
++{
++  if (backend->buffer_ready_source)
++    {
++      g_source_destroy (backend->buffer_ready_source);
++      g_clear_pointer (&backend->buffer_ready_source, g_source_unref);
++    }
++
++  if (backend->stage_view)
++    {
++      clutter_stage_view_set_present_func (
++        CLUTTER_STAGE_VIEW (backend->stage_view), NULL, NULL);
++
++      if (backend->current_buffer >= 0 &&
++          backend->placeholder_framebuffer &&
++          clutter_stage_view_get_onscreen (CLUTTER_STAGE_VIEW (backend->stage_view)) ==
++            backend->buffer_framebuffers[backend->current_buffer])
++        clutter_stage_view_replace_framebuffer (
++          CLUTTER_STAGE_VIEW (backend->stage_view),
++          backend->placeholder_framebuffer);
++
++      if (backend->frame_pending)
++        clutter_stage_view_notify_ready (CLUTTER_STAGE_VIEW (backend->stage_view));
++    }
++
++  for (int i = 0; i < MAX_BUFS; i++)
++    g_clear_object (&backend->buffer_framebuffers[i]);
++
++  backend->consumer_active = FALSE;
++  backend->current_buffer = -1;
++  backend->frame_pending = FALSE;
++  inhibit_frame_clock (backend);
++}
++
++static gboolean
++on_stage_view_present (ClutterStageView *stage_view,
++                       ClutterFrame     *frame,
++                       int64_t           global_frame_counter,
++                       gpointer          user_data)
++{
++  MetaBackendAnland *backend = user_data;
++  CoglFramebuffer *framebuffer;
++  CoglContext *cogl_context;
++  int fence_fd = -1;
++
++  if (!backend->consumer_active || !backend->transport ||
++      meta_anland_transport_is_fallback (backend->transport))
++    return FALSE;
++
++  framebuffer = clutter_stage_view_get_onscreen (stage_view);
++  cogl_context = cogl_framebuffer_get_context (framebuffer);
++  cogl_framebuffer_flush (framebuffer);
++
++  if (cogl_context_has_feature (cogl_context, COGL_FEATURE_ID_SYNC_FD))
++    fence_fd = cogl_context_get_latest_sync_fd (cogl_context);
++  else
++    {
++      if (!backend->warned_sync_fallback)
++        {
++          g_warning ("Anland backend has no native fence support; using synchronous rendering");
++          backend->warned_sync_fallback = TRUE;
++        }
++      cogl_framebuffer_finish (framebuffer);
++    }
++
++  meta_anland_transport_set_render_fence (backend->transport, fence_fd);
++  if (!meta_anland_transport_notify_frame_done (backend->transport))
++    {
++      clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_IDLE);
++      return TRUE;
++    }
++
++  backend->pending_global_frame_counter = global_frame_counter;
++  backend->pending_view_frame_counter = clutter_frame_get_count (frame);
++  backend->frame_pending = TRUE;
++  inhibit_frame_clock (backend);
++  clutter_frame_set_result (frame, CLUTTER_FRAME_RESULT_PENDING_PRESENTED);
++  return TRUE;
++}
++
++static gboolean
++buffer_ready_source_prepare (gpointer user_data)
++{
++  return FALSE;
++}
++
++static gboolean
++buffer_ready_source_dispatch (gpointer user_data)
++{
++  MetaBackendAnland *backend = META_BACKEND_ANLAND (user_data);
++  eventfd_t count;
++  int buffer_ready_fd;
++  int selected_buffer;
++
++  if (!backend->consumer_active || !backend->transport ||
++      meta_anland_transport_is_fallback (backend->transport))
++    return G_SOURCE_REMOVE;
++
++  buffer_ready_fd = meta_anland_transport_get_buffer_ready_fd (backend->transport);
++  if (buffer_ready_fd < 0 || eventfd_read (buffer_ready_fd, &count) < 0 ||
++      count != 1)
++    {
++      meta_anland_transport_enter_fallback (backend->transport);
++      return G_SOURCE_REMOVE;
++    }
++
++  selected_buffer = meta_anland_transport_get_selected_buffer (backend->transport);
++  if (selected_buffer < 0 || selected_buffer >= MAX_BUFS ||
++      !backend->buffer_framebuffers[selected_buffer])
++    {
++      meta_anland_transport_enter_fallback (backend->transport);
++      return G_SOURCE_REMOVE;
++    }
++
++  complete_pending_frame (backend);
++
++  if (backend->current_buffer != selected_buffer)
++    {
++      clutter_stage_view_replace_framebuffer (
++        CLUTTER_STAGE_VIEW (backend->stage_view),
++        backend->buffer_framebuffers[selected_buffer]);
++      backend->current_buffer = selected_buffer;
++    }
++
++  clutter_stage_view_add_redraw_clip (CLUTTER_STAGE_VIEW (backend->stage_view),
++                                      NULL);
++  uninhibit_frame_clock (backend);
++  clutter_stage_view_schedule_update_now (CLUTTER_STAGE_VIEW (backend->stage_view));
++  return G_SOURCE_CONTINUE;
++}
++
++static gboolean
++activate_consumer (MetaBackendAnland *backend)
++{
++  MetaRenderer *renderer = meta_backend_get_renderer (META_BACKEND (backend));
++  MetaRendererNative *renderer_native = META_RENDERER_NATIVE (renderer);
++  CoglFramebuffer *framebuffers[MAX_BUFS] = { NULL, };
++  struct buf_info buffer_info;
++  int n_buffers;
++  int buffer_ready_fd;
++  int source_fd;
++  int i;
++  g_autoptr (GError) error = NULL;
++
++  n_buffers = meta_anland_transport_get_buffer_count (backend->transport);
++  if (n_buffers < 1 || n_buffers > MAX_BUFS ||
++      !meta_anland_transport_get_buffer_info (backend->transport, 0,
++                                              &buffer_info))
++    goto failed;
++
++  if (buffer_info.width != backend->screen_info.width ||
++      buffer_info.height != backend->screen_info.height)
++    {
++      backend->screen_info.width = buffer_info.width;
++      backend->screen_info.height = buffer_info.height;
++      if (!update_virtual_monitor (backend, &error))
++        g_warning ("Failed to update the Anland virtual monitor: %s",
++                   error->message);
++      return FALSE;
++    }
++
++  if (!ensure_stage_view (backend, &error))
++    return FALSE;
++
++  if (cogl_framebuffer_get_width (backend->placeholder_framebuffer) !=
++        (int) buffer_info.width ||
++      cogl_framebuffer_get_height (backend->placeholder_framebuffer) !=
++        (int) buffer_info.height)
++    return FALSE;
++
++  for (i = 0; i < n_buffers; i++)
++    {
++      int fd;
++      uint32_t stride;
++      uint32_t offset;
++      uint64_t modifier;
++
++      if (!meta_anland_transport_get_buffer_info (backend->transport, i,
++                                                  &buffer_info))
++        goto failed;
++
++      fd = meta_anland_transport_get_buffer_fd (backend->transport, i);
++      if (fd < 0 || !validate_buffer_info (&buffer_info, fd, &error))
++        goto failed;
++
++      stride = buffer_info.stride;
++      offset = buffer_info.offset;
++      modifier = buffer_info.modifier;
++      framebuffers[i] = meta_renderer_native_create_dma_buf_framebuffer (
++        renderer_native, buffer_info.width, buffer_info.height,
++        DRM_FORMAT_ABGR8888, 1, &fd, &stride, &offset, &modifier, &error);
++      if (!framebuffers[i])
++        goto failed;
++    }
++
++  buffer_ready_fd = meta_anland_transport_get_buffer_ready_fd (backend->transport);
++  source_fd = fcntl (buffer_ready_fd, F_DUPFD_CLOEXEC, 3);
++  if (source_fd < 0)
++    {
++      g_set_error (&error, G_IO_ERROR, g_io_error_from_errno (errno),
++                   "Failed to duplicate Anland buffer-ready eventfd");
++      goto failed;
++    }
++
++  for (i = 0; i < n_buffers; i++)
++    backend->buffer_framebuffers[i] = framebuffers[i];
++  backend->consumer_active = TRUE;
++  backend->current_buffer = -1;
++  inhibit_frame_clock (backend);
++  clutter_stage_view_set_present_func (CLUTTER_STAGE_VIEW (backend->stage_view),
++                                       on_stage_view_present, backend);
++  backend->buffer_ready_source = meta_create_fd_source (
++    source_fd, "[mutter] Anland buffer ready",
++    buffer_ready_source_prepare, buffer_ready_source_dispatch, backend, NULL);
++  g_source_attach (backend->buffer_ready_source, NULL);
++  return TRUE;
++
++failed:
++  g_warning ("Failed to activate Anland consumer buffers: %s",
++             error ? error->message : "invalid transport state");
++  for (i = 0; i < MAX_BUFS; i++)
++    g_clear_object (&framebuffers[i]);
++  return FALSE;
++}
++
+ static gboolean reconnect_cb (gpointer user_data);
+ 
+ static void
+@@ -163,6 +546,7 @@ on_transport_fallback (void *user_data)
+ {
+   MetaBackendAnland *backend = user_data;
+ 
++  deactivate_consumer (backend);
+   schedule_reconnect (backend);
+ }
+ 
+@@ -190,6 +574,8 @@ reconnect_cb (gpointer user_data)
+   switch (pickup_result)
+     {
+     case META_ANLAND_TRANSPORT_PICKUP_READY:
++      if (!activate_consumer (backend))
++        return G_SOURCE_CONTINUE;
+       backend->reconnect_source_id = 0;
+       return G_SOURCE_REMOVE;
+     case META_ANLAND_TRANSPORT_PICKUP_NO_CONSUMER:
+@@ -255,8 +641,11 @@ meta_backend_anland_dispose (GObject *object)
+   MetaBackendAnland *backend = META_BACKEND_ANLAND (object);
+ 
+   g_clear_handle_id (&backend->reconnect_source_id, g_source_remove);
+-  g_clear_object (&backend->virtual_monitor);
+   clear_transport (backend);
++  uninhibit_frame_clock (backend);
++  g_clear_object (&backend->placeholder_framebuffer);
++  g_clear_object (&backend->stage_view);
++  g_clear_object (&backend->virtual_monitor);
+   g_clear_pointer (&backend->socket_path, g_free);
+ 
+   G_OBJECT_CLASS (meta_backend_anland_parent_class)->dispose (object);
+@@ -284,6 +673,7 @@ static void
+ meta_backend_anland_init (MetaBackendAnland *backend_anland)
+ {
+   backend_anland->socket_path = get_default_socket_path ();
++  backend_anland->current_buffer = -1;
+ }
+ 
+ gboolean
+diff --git a/src/backends/anland/vendor/meta-anland-transport.c b/src/backends/anland/vendor/meta-anland-transport.c
+index 785047fb23..b987eb2f74 100644
+--- a/src/backends/anland/vendor/meta-anland-transport.c
++++ b/src/backends/anland/vendor/meta-anland-transport.c
+@@ -94,9 +94,9 @@ enter_fallback (MetaAnlandTransport *transport)
+     return;
+ 
+   transport->fallback = true;
+-  release_consumer_resources (transport);
+   if (transport->fallback_callback)
+     transport->fallback_callback (transport->fallback_user_data);
++  release_consumer_resources (transport);
+ }
+ 
+ static int
+@@ -434,6 +434,13 @@ meta_anland_transport_is_fallback (MetaAnlandTransport *transport)
+   return !transport || transport->fallback;
+ }
+ 
++void
++meta_anland_transport_enter_fallback (MetaAnlandTransport *transport)
++{
++  if (transport)
++    enter_fallback (transport);
++}
++
+ void
+ meta_anland_transport_set_fallback_callback (MetaAnlandTransport *transport,
+                                              void                 (*callback) (void *user_data),
+diff --git a/src/backends/anland/vendor/meta-anland-transport.h b/src/backends/anland/vendor/meta-anland-transport.h
+index 79802a8200..248da61a85 100644
+--- a/src/backends/anland/vendor/meta-anland-transport.h
++++ b/src/backends/anland/vendor/meta-anland-transport.h
+@@ -30,6 +30,7 @@ MetaAnlandTransportPickupResult
+ meta_anland_transport_try_pickup (MetaAnlandTransport *transport);
+ 
+ bool meta_anland_transport_is_fallback (MetaAnlandTransport *transport);
++void meta_anland_transport_enter_fallback (MetaAnlandTransport *transport);
+ void meta_anland_transport_set_fallback_callback (MetaAnlandTransport *transport,
+                                                   void                 (*callback) (void *user_data),
+                                                   void                  *user_data);
+diff --git a/src/backends/meta-stage-impl.c b/src/backends/meta-stage-impl.c
+index 7936f3af40..1bd96112d0 100644
+--- a/src/backends/meta-stage-impl.c
++++ b/src/backends/meta-stage-impl.c
+@@ -315,6 +315,13 @@ swap_framebuffer (ClutterStageWindow *stage_window,
+     {
+       MetaStageView *view = META_STAGE_VIEW (stage_view);
+ 
++      if (clutter_stage_view_present (stage_view, frame,
++                                      priv->global_frame_counter))
++        {
++          priv->global_frame_counter++;
++          return;
++        }
++
+       meta_topic (META_DEBUG_BACKEND,
+                   "fake offscreen swap (framebuffer: %p)",
+                   framebuffer);
+diff --git a/src/backends/native/meta-renderer-native.c b/src/backends/native/meta-renderer-native.c
+index 60b8d005c1..f65afc548d 100644
+--- a/src/backends/native/meta-renderer-native.c
++++ b/src/backends/native/meta-renderer-native.c
+@@ -664,11 +664,43 @@ meta_renderer_native_create_dma_buf_framebuffer (MetaRendererNative  *renderer_n
+   CoglTexture *cogl_tex;
+   CoglOffscreen *cogl_fbo;
+   const MetaFormatInfo *format_info;
++  const uint64_t *import_modifiers = modifiers;
+ 
+   format_info = meta_format_info_from_drm_format (drm_format);
+-  g_assert (format_info);
++  if (!format_info)
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                   "Unsupported dma-buf format 0x%08x", drm_format);
++      return NULL;
++    }
+   cogl_format = format_info->cogl_format;
+ 
++  if (!meta_egl_has_extensions (egl, egl_display, NULL,
++                                "EGL_EXT_image_dma_buf_import", NULL))
++    {
++      g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                   "EGL does not support dma-buf image import");
++      return NULL;
++    }
++
++  if (modifiers &&
++      !meta_egl_has_extensions (egl, egl_display, NULL,
++                                "EGL_EXT_image_dma_buf_import_modifiers",
++                                NULL))
++    {
++      for (int i = 0; i < n_planes; i++)
++        {
++          if (modifiers[i] != DRM_FORMAT_MOD_LINEAR)
++            {
++              g_set_error (error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED,
++                           "EGL cannot import non-linear dma-buf modifiers");
++              return NULL;
++            }
++        }
++
++      import_modifiers = NULL;
++    }
++
+   egl_image = meta_egl_create_dmabuf_image (egl,
+                                             egl_display,
+                                             width,
+@@ -678,7 +710,7 @@ meta_renderer_native_create_dma_buf_framebuffer (MetaRendererNative  *renderer_n
+                                             fds,
+                                             strides,
+                                             offsets,
+-                                            modifiers,
++                                            import_modifiers,
+                                             error);
+   if (egl_image == EGL_NO_IMAGE_KHR)
+     return NULL;

@@ -23,37 +23,51 @@ termux_setup_build_python() {
 			exit 1
 		fi
 	else
+		local _PYTHON_VERSION
 		local _PYTHON_SRCURL
 		local _PYTHON_SHA256
 		local _PYTHON_FOLDER
-		if [[ "${TERMUX_PACKAGE_LIBRARY}" == "bionic" ]]; then
-			_PYTHON_SRCURL="$(. "$TERMUX_SCRIPTDIR/packages/python/build.sh"; echo "$TERMUX_PKG_SRCURL")"
-			_PYTHON_SHA256="$(. "$TERMUX_SCRIPTDIR/packages/python/build.sh"; echo "$TERMUX_PKG_SHA256")"
-		else # glibc
-			_PYTHON_SRCURL="$(. "$TERMUX_SCRIPTDIR/gpkg/python/build.sh"; echo "$TERMUX_PKG_SRCURL")"
-			_PYTHON_SHA256="$(. "$TERMUX_SCRIPTDIR/gpkg/python/build.sh"; echo "$TERMUX_PKG_SHA256")"
-		fi
+		local _APPLY_TERMUX_PYTHON_PATCH=true
+		case "$#" in
+			0)
+				_PYTHON_VERSION="$TERMUX_PYTHON_VERSION"
+				if [[ "${TERMUX_PACKAGE_LIBRARY}" == "bionic" ]]; then
+					_PYTHON_SRCURL="$(. "$TERMUX_SCRIPTDIR/packages/python/build.sh"; echo "$TERMUX_PKG_SRCURL")"
+					_PYTHON_SHA256="$(. "$TERMUX_SCRIPTDIR/packages/python/build.sh"; echo "$TERMUX_PKG_SHA256")"
+				else # glibc
+					_PYTHON_SRCURL="$(. "$TERMUX_SCRIPTDIR/gpkg/python/build.sh"; echo "$TERMUX_PKG_SRCURL")"
+					_PYTHON_SHA256="$(. "$TERMUX_SCRIPTDIR/gpkg/python/build.sh"; echo "$TERMUX_PKG_SHA256")"
+				fi
+				;;
+			3)
+				_PYTHON_VERSION="$1"
+				_PYTHON_SRCURL="$2"
+				_PYTHON_SHA256="$3"
+				_APPLY_TERMUX_PYTHON_PATCH=false
+				;;
+			*) termux_error_exit "termux_setup_build_python expects either zero or three arguments.";;
+		esac
 		if [[ "${TERMUX_PACKAGES_OFFLINE-false}" = "true" ]]; then
-			_PYTHON_FOLDER=${TERMUX_SCRIPTDIR}/build-tools/python-${TERMUX_PYTHON_VERSION}
+			_PYTHON_FOLDER=${TERMUX_SCRIPTDIR}/build-tools/python-${_PYTHON_VERSION}
 		else
-			_PYTHON_FOLDER=${TERMUX_COMMON_CACHEDIR}/python-${TERMUX_PYTHON_VERSION}
+			_PYTHON_FOLDER=${TERMUX_COMMON_CACHEDIR}/python-${_PYTHON_VERSION}
 		fi
 		export TERMUX_BUILD_PYTHON_DIR=$_PYTHON_FOLDER
 
 		if [[ ! -d "$_PYTHON_FOLDER" ]]; then
-			[[ "${CI-false}" == "true" ]] && echo "::group::INFO: [${FUNCNAME[0]}] Building minimal host Python ${TERMUX_PYTHON_VERSION}" || :
+			[[ "${CI-false}" == "true" ]] && echo "::group::INFO: [${FUNCNAME[0]}] Building minimal host Python $_PYTHON_VERSION" || :
 
 			termux_download \
-				"$_PYTHON_SRCURL" "python-${TERMUX_PYTHON_VERSION}.tar.xz" "$_PYTHON_SHA256"
+				"$_PYTHON_SRCURL" "python-$_PYTHON_VERSION.tar.xz" "$_PYTHON_SHA256"
 			mkdir "$_PYTHON_FOLDER"
 			tar \
 				--extract \
 				--strip-components=1 \
 				-C "$_PYTHON_FOLDER" \
-				-f "python-${TERMUX_PYTHON_VERSION}.tar.xz"
+				-f "python-$_PYTHON_VERSION.tar.xz"
 			cd "$_PYTHON_FOLDER"
 
-			if [[ "${TERMUX_PACKAGE_LIBRARY}" = "bionic" ]]; then
+			if [[ "$_APPLY_TERMUX_PYTHON_PATCH" == "true" && "${TERMUX_PACKAGE_LIBRARY}" = "bionic" ]]; then
 				for f in "$TERMUX_SCRIPTDIR"/packages/python/0008-fix-ctypes-util-find_library.patch; do
 					echo "[${FUNCNAME[0]}]: Applying $(basename "$f")"
 					cat "$f" | sed -e "s|@@TERMUX_PKG_API_LEVEL@@|${TERMUX_PKG_API_LEVEL}|g" | patch --silent -p1
