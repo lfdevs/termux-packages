@@ -1,0 +1,85 @@
+From 0635f8d6fc6aa0390b93467b350c60e1d6364d76 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Fri, 14 Aug 2026 22:27:06 +0800
+Subject: [PATCH 12/12] plugins/qpa: fall back to software without a DRM device
+
+The Anland backend can run with a surfaceless EGL display and no KWin
+DrmDevice. Qt Quick still selected its OpenGL renderer, then the QPA
+window code dereferenced the missing device while allocating its
+swapchain.
+
+Select Qt Quick software rendering in this configuration and allocate
+the associated buffers through the SHM allocator. Reject non-dma-buf
+buffers in the OpenGL QPA path as an additional safeguard, so an
+unexpected direct OpenGL window fails cleanly instead of dereferencing
+null dma-buf attributes.
+---
+ src/compositor.cpp                     | 7 ++++++-
+ src/plugins/qpa/eglplatformcontext.cpp | 8 +++++++-
+ src/plugins/qpa/window.cpp             | 6 ++++--
+ 3 files changed, 17 insertions(+), 4 deletions(-)
+
+diff --git a/src/compositor.cpp b/src/compositor.cpp
+index 3742d95385..c7f3922e9c 100644
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -267,7 +267,12 @@ void Compositor::start()
+         case NoCompositing:
+             break;
+         case OpenGLCompositing:
+-            QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
++            if (m_backend->drmDevice()) {
++                QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
++            } else {
++                qCWarning(KWIN_CORE) << "No DRM device available; forcing Qt Quick to use the software renderer";
++                QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
++            }
+             break;
+         case QPainterCompositing:
+             QQuickWindow::setGraphicsApi(QSGRendererInterface::Software);
+diff --git a/src/plugins/qpa/eglplatformcontext.cpp b/src/plugins/qpa/eglplatformcontext.cpp
+index 65454525db..c07c7ca4ea 100644
+--- a/src/plugins/qpa/eglplatformcontext.cpp
++++ b/src/plugins/qpa/eglplatformcontext.cpp
+@@ -93,7 +93,13 @@ bool EGLPlatformContext::makeCurrent(QPlatformSurface *surface)
+         if (it != m_renderTargets.end()) {
+             m_current = it->second;
+         } else {
+-            std::shared_ptr<GLTexture> texture = m_eglContext->importDmaBufAsTexture(*buffer->dmabufAttributes());
++            const DmaBufAttributes *attributes = buffer->dmabufAttributes();
++            if (!attributes) {
++                qCWarning(KWIN_QPA) << "Cannot import a non-dma-buf graphics buffer into an OpenGL context";
++                return false;
++            }
++
++            std::shared_ptr<GLTexture> texture = m_eglContext->importDmaBufAsTexture(*attributes);
+             if (!texture) {
+                 return false;
+             }
+diff --git a/src/plugins/qpa/window.cpp b/src/plugins/qpa/window.cpp
+index 9c618ff3ff..c48be68852 100644
+--- a/src/plugins/qpa/window.cpp
++++ b/src/plugins/qpa/window.cpp
+@@ -47,7 +47,9 @@ Window::~Window()
+ Swapchain *Window::swapchain(const std::shared_ptr<EglContext> &context, const FormatModifierMap &formats)
+ {
+     const QSize nativeSize = geometry().size() * devicePixelRatio();
+-    const bool software = window()->surfaceType() == QSurface::RasterSurface; // RasterGLSurface is unsupported by us
++    const bool isRaster = window()->surfaceType() == QSurface::RasterSurface; // RasterGLSurface is unsupported by us
++    DrmDevice *device = isRaster ? nullptr : Compositor::self()->backend()->drmDevice();
++    const bool software = isRaster || !device;
+     if (!m_swapchain || m_swapchain->size() != nativeSize
+         || !formats.contains(m_swapchain->format())
+         || m_swapchain->modifiers() != formats[m_swapchain->format()]
+@@ -57,7 +59,7 @@ Swapchain *Window::swapchain(const std::shared_ptr<EglContext> &context, const F
+             static ShmGraphicsBufferAllocator shmAllocator;
+             allocator = &shmAllocator;
+         } else {
+-            allocator = Compositor::self()->backend()->drmDevice()->allocator();
++            allocator = device->allocator();
+         }
+ 
+         for (auto it = formats.begin(); it != formats.end(); it++) {
+-- 
+2.47.3
+

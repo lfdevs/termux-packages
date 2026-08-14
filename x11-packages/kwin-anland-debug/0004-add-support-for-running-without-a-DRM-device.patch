@@ -1,0 +1,348 @@
+From e294d82ac8d582acaf92c41291903c07d8f972e3 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 5 Jul 2026 21:49:33 +0800
+Subject: [PATCH 04/12] backends/anland: Add support for running without a DRM
+ device
+
+Introduce the `ANLAND_NO_DRM_DEVICE` environment variable. When set to
+a truthy value (1, true, yes, on), it allows the Anland backend to bypass
+the DRM render device initialization and proceed without a KWin `DrmDevice`.
+
+Previously, the backend would fail to initialize if a usable DRM render
+device could not be opened, as KWin dereferences `renderBackend->drmDevice()`
+during OpenGL compositor setup. This change provides an escape hatch to
+force the backend to continue and use surfaceless EGL instead.
+---
+ src/backends/anland/anland_backend.cpp     | 41 +++++++++++++-----
+ src/backends/anland/anland_backend.h       |  6 +++
+ src/backends/anland/anland_egl_backend.cpp | 14 +++++--
+ src/compositor.cpp                         |  8 ++--
+ src/opengl/eglbackend.cpp                  | 49 ++++++++++++++++------
+ src/opengl/egldisplay.cpp                  |  4 ++
+ src/wayland_server.cpp                     | 13 +++++-
+ 7 files changed, 104 insertions(+), 31 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index c44ee98fe5..060c53ff17 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -56,6 +56,11 @@ static const int s_reconnectIntervalMs = 200;
+  * backend does), then the standard render node — which on the kgsl/turnip stack
+  * is the msm node exposed at /dev/dri/renderD128.
+  */
++static std::unique_ptr<EglDisplay> createSurfacelessEglDisplay(DrmDevice *drmDevice)
++{
++    return EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr), drmDevice);
++}
++
+ static std::unique_ptr<RenderDevice> createRenderDevice(const QString &path)
+ {
+     auto drmDevice = DrmDevice::open(path);
+@@ -63,7 +68,7 @@ static std::unique_ptr<RenderDevice> createRenderDevice(const QString &path)
+         return nullptr;
+     }
+ 
+-    auto eglDisplay = EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr), drmDevice.get());
++    auto eglDisplay = createSurfacelessEglDisplay(drmDevice.get());
+     if (!eglDisplay) {
+         return nullptr;
+     }
+@@ -101,6 +106,12 @@ static std::unique_ptr<RenderDevice> openRenderDevice()
+     return createRenderDevice(QStringLiteral("/dev/dri/renderD128"));
+ }
+ 
++static bool noDrmDeviceRequested()
++{
++    const QByteArray value = qgetenv("ANLAND_NO_DRM_DEVICE").trimmed().toLower();
++    return value == "1" || value == "true" || value == "yes" || value == "on";
++}
++
+ AnlandBackend::AnlandBackend(const QString &socketPath, QObject *parent)
+     : OutputBackend(parent)
+     , m_socketPath(socketPath.isEmpty() ? s_defaultSocketPath : socketPath)
+@@ -124,8 +135,8 @@ AnlandBackend::~AnlandBackend()
+         ::disconnect(m_display); // C producer API, not QObject::disconnect
+         m_display = nullptr;
+     }
+-    // m_renderDevice owns the EglDisplay; the 5.27-era manual
+-    // eglTerminate(sceneEglDisplay()) is no longer needed.
++    // m_renderDevice (or m_eglDisplay in no-DRM mode) owns the EglDisplay;
++    // the 5.27-era manual eglTerminate(sceneEglDisplay()) is no longer needed.
+ }
+ 
+ bool AnlandBackend::initialize()
+@@ -147,12 +158,22 @@ bool AnlandBackend::initialize()
+         return false;
+     }
+ 
+-    // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
+-    // setup; without a real device it segfaults. Open one up front.
+-    m_renderDevice = openRenderDevice();
+-    if (!m_renderDevice) {
+-        qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
+-        return false;
++    m_noDrmDeviceMode = noDrmDeviceRequested();
++    if (m_noDrmDeviceMode) {
++        qCWarning(KWIN_ANLAND) << "ANLAND_NO_DRM_DEVICE is enabled; using surfaceless EGL without a KWin DrmDevice";
++        m_eglDisplay = createSurfacelessEglDisplay(nullptr);
++        if (!m_eglDisplay) {
++            qCWarning(KWIN_ANLAND) << "could not create surfaceless EGL display";
++            return false;
++        }
++    } else {
++        // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
++        // setup; without a real device it segfaults. Open one up front.
++        m_renderDevice = openRenderDevice();
++        if (!m_renderDevice) {
++            qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
++            return false;
++        }
+     }
+ 
+     m_inputDevice = std::make_unique<AnlandInputDevice>();
+@@ -226,7 +247,7 @@ QList<BackendOutput *> AnlandBackend::outputs() const
+ 
+ EglDisplay *AnlandBackend::sceneEglDisplayObject() const
+ {
+-    return m_renderDevice ? m_renderDevice->eglDisplay() : nullptr;
++    return m_renderDevice ? m_renderDevice->eglDisplay() : m_eglDisplay.get();
+ }
+ 
+ bool AnlandBackend::notifyFramePresented()
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+index f78b2434d1..fd20c94fff 100644
+--- a/src/backends/anland/anland_backend.h
++++ b/src/backends/anland/anland_backend.h
+@@ -68,6 +68,10 @@ public:
+     {
+         return m_renderDevice ? m_renderDevice->drmDevice() : nullptr;
+     }
++    bool noDrmDeviceMode() const
++    {
++        return m_noDrmDeviceMode;
++    }
+     AnlandInputDevice *inputDevice() const
+     {
+         return m_inputDevice.get();
+@@ -111,6 +115,7 @@ private:
+     display_ctx *m_display = nullptr;
+ 
+     std::unique_ptr<RenderDevice> m_renderDevice;
++    std::unique_ptr<EglDisplay> m_eglDisplay;
+     QVector<AnlandOutput *> m_outputs;
+     std::unique_ptr<AnlandInputDevice> m_inputDevice;
+ 
+@@ -120,6 +125,7 @@ private:
+ 
+     bool m_consumerReady = false;
+     bool m_inFallback = false;
++    bool m_noDrmDeviceMode = false;
+ 
+     // Last known clipboard text — used to de-duplicate (KWin changed -> we sent ->
+     // consumer sets the same text on Android -> consumer sends back to KWin).
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index a29fca1649..f409a52793 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -258,9 +258,10 @@ bool AnlandEglBackend::initializeEgl()
+     if (!initClientExtensions()) {
+         return false;
+     }
+-    Q_ASSERT(m_backend->renderDevice());
+-    setRenderDevice(m_backend->renderDevice());
+-    return true;
++    if (m_backend->renderDevice()) {
++        setRenderDevice(m_backend->renderDevice());
++    }
++    return m_backend->sceneEglDisplayObject() != nullptr;
+ }
+ 
+ bool AnlandEglBackend::init()
+@@ -293,7 +294,12 @@ bool AnlandEglBackend::init()
+ 
+ bool AnlandEglBackend::initRenderingContext()
+ {
+-    return createContext() && openglContext()->makeCurrent();
++    if (m_backend->renderDevice()) {
++        return createContext() && openglContext()->makeCurrent();
++    }
++
++    m_context = EglContext::create(m_backend->sceneEglDisplayObject(), EGL_NO_CONFIG_KHR, nullptr);
++    return m_context && m_context->makeCurrent();
+ }
+ 
+ void AnlandEglBackend::addOutput(BackendOutput *output)
+diff --git a/src/compositor.cpp b/src/compositor.cpp
+index 616ee65b8c..3742d95385 100644
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -131,9 +131,11 @@ static QVariantHash collectCrashInformation(const EglBackend *backend)
+     QVariantHash gpuInformation;
+     gpuInformation[QStringLiteral("api_type")] = QStringLiteral("OpenGL");
+     gpuInformation[QStringLiteral("name")] = QString::fromUtf8(glPlatform->glRendererString());
+-    if (const auto pciInfo = backend->drmDevice()->pciDeviceInfo()) {
+-        gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
+-        gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++    if (DrmDevice *drmDevice = backend->drmDevice()) {
++        if (const auto pciInfo = drmDevice->pciDeviceInfo()) {
++            gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
++            gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++        }
+     }
+     if (glPlatform->driverVersion().isValid()) {
+         gpuInformation[QStringLiteral("version")] = glPlatform->driverVersion().toString();
+diff --git a/src/opengl/eglbackend.cpp b/src/opengl/eglbackend.cpp
+index 75c7e73fd4..7a80dc416b 100644
+--- a/src/opengl/eglbackend.cpp
++++ b/src/opengl/eglbackend.cpp
+@@ -122,12 +122,32 @@ void EglBackend::initWayland()
+         return;
+     }
+     DrmDevice *scanoutDevice = drmDevice();
+-    Q_ASSERT(scanoutDevice);
++    EglDisplay *display = eglDisplayObject();
++    if (!display) {
++        return;
++    }
++
++    if (!scanoutDevice) {
++        const auto formats = display->nonExternalOnlySupportedDrmFormats();
++        if (!formats.isEmpty()) {
++            m_tranches.append({
++                .device = display->renderDevNode().value_or(0),
++                .flags = {},
++                .formatTable = formats,
++            });
++
++            LinuxDmaBufV1ClientBufferIntegration *dmabuf = waylandServer()->linuxDmabuf();
++            dmabuf->setRenderBackend(this);
++            dmabuf->setSupportedFormatsWithModifiers(m_tranches);
++        }
++        waylandServer()->setRenderBackend(this);
++        return;
++    }
+ 
+-    auto filterFormats = [this](std::optional<uint32_t> bpc, bool withExternalOnlyYUV) {
++    auto filterFormats = [this, display](std::optional<uint32_t> bpc, bool withExternalOnlyYUV) {
+         FormatModifierMap set;
+-        const auto &allFormats = m_renderDevice->eglDisplay()->allSupportedDrmFormats();
+-        const auto &nonExternalOnly = m_renderDevice->eglDisplay()->nonExternalOnlySupportedDrmFormats();
++        const auto &allFormats = display->allSupportedDrmFormats();
++        const auto &nonExternalOnly = display->nonExternalOnlySupportedDrmFormats();
+         for (auto it = allFormats.constBegin(); it != allFormats.constEnd(); it++) {
+             const auto info = FormatInfo::get(it.key());
+             if (bpc && (!info || bpc != info->bitsPerColor)) {
+@@ -175,17 +195,17 @@ void EglBackend::initWayland()
+     };
+ 
+     m_tranches.append({
+-        .device = m_renderDevice->eglDisplay()->renderDevNode().value_or(scanoutDevice->deviceId()),
++        .device = display->renderDevNode().value_or(scanoutDevice->deviceId()),
+         .flags = LinuxDmaBufV1Feedback::TrancheFlag::Sampling,
+         .formatTable = filterFormats(10, false),
+     });
+     m_tranches.append({
+-        .device = m_renderDevice->eglDisplay()->renderDevNode().value_or(scanoutDevice->deviceId()),
++        .device = display->renderDevNode().value_or(scanoutDevice->deviceId()),
+         .flags = LinuxDmaBufV1Feedback::TrancheFlag::Sampling,
+         .formatTable = filterFormats(8, false),
+     });
+     m_tranches.append({
+-        .device = m_renderDevice->eglDisplay()->renderDevNode().value_or(scanoutDevice->deviceId()),
++        .device = display->renderDevNode().value_or(scanoutDevice->deviceId()),
+         .flags = LinuxDmaBufV1Feedback::TrancheFlag::Sampling,
+         .formatTable = includeShaderConversions(filterFormats(std::nullopt, true)),
+     });
+@@ -248,12 +268,12 @@ QList<LinuxDmaBufV1Feedback::Tranche> EglBackend::tranches() const
+ 
+ EGLImageKHR EglBackend::importBufferAsImage(GraphicsBuffer *buffer)
+ {
+-    return m_renderDevice->eglDisplay()->importBufferAsImage(buffer);
++    return eglDisplayObject()->importBufferAsImage(buffer);
+ }
+ 
+ EGLImageKHR EglBackend::importBufferAsImage(GraphicsBuffer *buffer, int plane, int format, const QSize &size)
+ {
+-    return m_renderDevice->eglDisplay()->importBufferAsImage(buffer, plane, format, size);
++    return eglDisplayObject()->importBufferAsImage(buffer, plane, format, size);
+ }
+ 
+ std::shared_ptr<GLTexture> EglBackend::importDmaBufAsTexture(const DmaBufAttributes &attributes) const
+@@ -263,7 +283,11 @@ std::shared_ptr<GLTexture> EglBackend::importDmaBufAsTexture(const DmaBufAttribu
+ 
+ bool EglBackend::testImportBuffer(GraphicsBuffer *buffer)
+ {
+-    const auto nonExternalOnly = m_renderDevice->eglDisplay()->nonExternalOnlySupportedDrmFormats();
++    EglDisplay *display = eglDisplayObject();
++    if (!display) {
++        return false;
++    }
++    const auto nonExternalOnly = display->nonExternalOnlySupportedDrmFormats();
+     if (auto it = nonExternalOnly.find(buffer->dmabufAttributes()->format); it != nonExternalOnly.end() && it->contains(buffer->dmabufAttributes()->modifier)) {
+         return importBufferAsImage(buffer) != EGL_NO_IMAGE_KHR;
+     }
+@@ -286,12 +310,13 @@ bool EglBackend::testImportBuffer(GraphicsBuffer *buffer)
+ 
+ FormatModifierMap EglBackend::supportedFormats() const
+ {
+-    return m_renderDevice->eglDisplay()->nonExternalOnlySupportedDrmFormats();
++    EglDisplay *display = eglDisplayObject();
++    return display ? display->nonExternalOnlySupportedDrmFormats() : FormatModifierMap{};
+ }
+ 
+ EglDisplay *EglBackend::eglDisplayObject() const
+ {
+-    return m_renderDevice->eglDisplay();
++    return m_renderDevice ? m_renderDevice->eglDisplay() : (m_context ? m_context->displayObject() : nullptr);
+ }
+ 
+ EglContext *EglBackend::openglContext() const
+diff --git a/src/opengl/egldisplay.cpp b/src/opengl/egldisplay.cpp
+index 067e92ec13..d12610161d 100644
+--- a/src/opengl/egldisplay.cpp
++++ b/src/opengl/egldisplay.cpp
+@@ -95,6 +95,10 @@ std::unique_ptr<EglDisplay> EglDisplay::create(::EGLDisplay display, DrmDevice *
+ 
+ static std::optional<dev_t> devIdForFileName(const QString &path)
+ {
++    if (path.isEmpty()) {
++        return std::nullopt;
++    }
++
+     auto device = DrmDevice::open(path);
+     if (device) {
+         return device->deviceId();
+diff --git a/src/wayland_server.cpp b/src/wayland_server.cpp
+index fe099573c7..4f3c9c11fb 100644
+--- a/src/wayland_server.cpp
++++ b/src/wayland_server.cpp
+@@ -863,7 +863,16 @@ ExtBackgroundEffectManagerV1 *WaylandServer::backgroundEffectManager() const
+ 
+ void WaylandServer::setRenderBackend(RenderBackend *backend)
+ {
+-    if (backend->drmDevice()->supportsSyncObjTimelines()) {
++    DrmDevice *drmDevice = backend->drmDevice();
++    if (!drmDevice) {
++        if (m_linuxDrmSyncObj) {
++            m_linuxDrmSyncObj->remove();
++            m_linuxDrmSyncObj = nullptr;
++        }
++        return;
++    }
++
++    if (drmDevice->supportsSyncObjTimelines()) {
+         // ensure the DRM_IOCTL_SYNCOBJ_EVENTFD ioctl is supported
+         const auto linuxVersion = linuxKernelVersion();
+         if (linuxVersion.majorVersion() < 6 && linuxVersion.minorVersion() < 6) {
+@@ -874,7 +883,7 @@ void WaylandServer::setRenderBackend(RenderBackend *backend)
+             return;
+         }
+         if (!m_linuxDrmSyncObj) {
+-            m_linuxDrmSyncObj = new LinuxDrmSyncObjV1Interface(m_display, m_display, backend->drmDevice());
++            m_linuxDrmSyncObj = new LinuxDrmSyncObjV1Interface(m_display, m_display, drmDevice);
+         }
+     } else if (m_linuxDrmSyncObj) {
+         m_linuxDrmSyncObj->remove();
+-- 
+2.47.3
+
