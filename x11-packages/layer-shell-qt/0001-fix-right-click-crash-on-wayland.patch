@@ -1,0 +1,51 @@
+From 720df2595e65185d9ebea505beb709dd1145a6d5 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Thu, 23 Jul 2026 13:49:32 +0800
+Subject: [PATCH] Fix popup attachment with libc++
+
+Avoid using std::any_cast to retrieve the xdg_popup role, as libc++
+RTTI comparison can fail across shared modules loaded with RTLD_LOCAL.
+
+Retrieve the popup through Qt's platform native interface instead,
+preventing Plasma context menus from causing a Wayland protocol error.
+
+Related URLs:
+* https://bugs.kde.org/show_bug.cgi?id=479679
+* https://github.com/llvm/llvm-project/issues/36746
+* https://github.com/freebsd/freebsd-ports/pull/431
+---
+ src/qwaylandlayersurface.cpp | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/src/qwaylandlayersurface.cpp b/src/qwaylandlayersurface.cpp
+index 1d12b05..dbca343 100644
+--- a/src/qwaylandlayersurface.cpp
++++ b/src/qwaylandlayersurface.cpp
+@@ -16,6 +16,7 @@
+ #include <QtWaylandClient/private/qwaylandwindow_p.h>
+ 
+ #include <QGuiApplication>
++#include <qpa/qplatformnativeinterface.h>
+ 
+ namespace LayerShellQt
+ {
+@@ -119,10 +120,13 @@ void QWaylandLayerSurface::zwlr_layer_surface_v1_configure(uint32_t serial, uint
+ 
+ void QWaylandLayerSurface::attachPopup(QtWaylandClient::QWaylandShellSurface *popup)
+ {
+-    std::any anyRole = popup->surfaceRole();
++    auto *nativeInterface = QGuiApplication::platformNativeInterface();
++    void *role = nativeInterface
++        ? nativeInterface->nativeResourceForWindow("xdg_popup", popup->window()->window())
++        : nullptr;
+ 
+-    if (auto role = std::any_cast<::xdg_popup *>(&anyRole)) {
+-        get_popup(*role);
++    if (role) {
++        get_popup(static_cast<::xdg_popup *>(role));
+     } else {
+         qCWarning(LAYERSHELLQT) << "Cannot attach popup of unknown type";
+     }
+-- 
+2.47.3
+
