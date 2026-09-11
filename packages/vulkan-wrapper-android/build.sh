@@ -2,12 +2,12 @@ TERMUX_PKG_HOMEPAGE=https://www.mesa3d.org
 TERMUX_PKG_DESCRIPTION="Android Vulkan ICD"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_LICENSE_FILE="docs/license.rst"
-TERMUX_PKG_MAINTAINER="xMeM <haooy@outlook.com>"
-TERMUX_PKG_VERSION="25.0.0"
-TERMUX_PKG_SRCURL=git+https://github.com/xMeM/mesa
-TERMUX_PKG_GIT_BRANCH=wrapper
-_COMMIT=e65c7eb6ee2f9903c3256f2677beb1d98464103f
-TERMUX_PKG_DEPENDS="libandroid-shmem, libc++, libdrm, libx11, libxcb, libxshmfence, libwayland, vulkan-loader-generic, zlib, zstd"
+TERMUX_PKG_MAINTAINER="@lfdevs"
+TERMUX_PKG_VERSION="26.3.0"
+TERMUX_PKG_SRCURL=git+https://github.com/lfdevs/mesa-for-android-container
+TERMUX_PKG_GIT_BRANCH=termux/vulkan-wrapper-android
+_COMMIT=d1dab1b9e434c104e4eb85310d3d60da568c4688
+TERMUX_PKG_DEPENDS="libandroid-shmem, libc++, libdrm, libwayland, libx11, libxshmfence, vulkan-loader-generic, zlib, zstd"
 TERMUX_PKG_BUILD_DEPENDS="libwayland-protocols, libxrandr, xorgproto"
 TERMUX_PKG_API_LEVEL=26
 
@@ -18,7 +18,7 @@ TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
 -Dopengl=false
 -Dllvm=disabled
 -Dshared-llvm=disabled
--Dplatforms=x11
+-Dplatforms=x11,wayland
 -Dgallium-drivers=
 -Dxmlconfig=disabled
 -Dvulkan-drivers=wrapper
@@ -35,8 +35,8 @@ termux_step_post_get_source() {
 termux_step_pre_configure() {
 	termux_setup_cmake
 
-	if [ "$TERMUX_ON_DEVICE_BUILD" = "true" ]; then
-		CFLAGS+=" --target=$TERMUX_HOST_PLATFORM$TERMUX_PKG_API_LEVEL"
+	if [ "${TERMUX_ON_DEVICE_BUILD}" = "true" ]; then
+		CFLAGS+=" --target=${TERMUX_HOST_PLATFORM}${TERMUX_PKG_API_LEVEL}"
 	fi
 
 	CPPFLAGS+=" -D__USE_GNU"
@@ -51,7 +51,7 @@ termux_step_pre_configure() {
 		chmod 0700 $_WRAPPER_BIN/cmake
 		termux_setup_wayland_cross_pkg_config_wrapper
 	fi
-	export PATH=$_WRAPPER_BIN:$PATH
+	export PATH="${_WRAPPER_BIN}:${PATH}"
 }
 
 termux_step_post_configure() {
