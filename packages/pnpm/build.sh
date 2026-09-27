@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://pnpm.io
 TERMUX_PKG_DESCRIPTION="Fast, disk space efficient package manager for JavaScript"
 TERMUX_PKG_LICENSE="MIT"
 TERMUX_PKG_MAINTAINER="Gouranga Das Samrat <gouranga.das.khulna@gmail.com>"
-TERMUX_PKG_VERSION="12.4.1"
+TERMUX_PKG_VERSION="12.7.0"
 TERMUX_PKG_SRCURL="https://github.com/pnpm/pnpm/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz"
-TERMUX_PKG_SHA256=7388d1fe40ff2862d97645d4f5fca9f4a2459ac534c005d990717298aeacef6b
+TERMUX_PKG_SHA256=67be9d5f3b3ae6ad39cb6f61ebd34d7dad57fd21c4290f67c9bf83b2a153019d
 TERMUX_PKG_DEPENDS="git, nodejs | nodejs-lts"
 TERMUX_PKG_UPDATE_TAG_TYPE="newest-tag"
 TERMUX_PKG_BUILD_IN_SRC=true
@@ -20,6 +20,11 @@ termux_step_pre_configure() {
 	# toolchain rustup/termux_setup_rust already configured (with the
 	# Android target already added) is used instead.
 	rm -f rust-toolchain.toml rust-toolchain
+
+
+	if [[ -f .cargo/config.toml ]]; then
+		sed -i '/# >>> pnpm-managed cargo sources >>>/,/# <<< pnpm-managed cargo sources <<</d' .cargo/config.toml
+	fi
 
 	if [[ "$TERMUX_ARCH" == "i686" ]]; then
 		local patch="$TERMUX_PKG_BUILDER_DIR/sha2-no-asm.diff"

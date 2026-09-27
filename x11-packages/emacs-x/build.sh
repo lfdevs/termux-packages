@@ -4,7 +4,7 @@ TERMUX_PKG_LICENSE="GPL-3.0"
 TERMUX_PKG_MAINTAINER="@termux"
 # Update both emacs and emacs-x to the same version in one PR.
 TERMUX_PKG_VERSION="31.1"
-TERMUX_PKG_REVISION=3
+TERMUX_PKG_REVISION=4
 TERMUX_PKG_SRCURL="https://mirrors.kernel.org/gnu/emacs/emacs-${TERMUX_PKG_VERSION}.tar.xz"
 TERMUX_PKG_SHA256=1da5790d9580c81932b5bf700633114468da7b3412d69faa767daebf974f4586
 TERMUX_PKG_DEPENDS="dbus, fontconfig, freetype, gdk-pixbuf, giflib, glib, harfbuzz, libacl, libcairo, libgmp, libgnutls, libice, libjpeg-turbo, libpng, librsvg, libsm, libsqlite, libtiff, libwebp, libx11, libxaw, libxcb, libxext, libxfixes, libxft, libxinerama, libxml2, libxmu, libxpm, libxrandr, libxrender, libxt, littlecms, ncurses, tree-sitter, zlib"
@@ -12,15 +12,18 @@ TERMUX_PKG_CONFLICTS="emacs"
 TERMUX_PKG_REPLACES="emacs"
 TERMUX_PKG_PROVIDES="emacs"
 TERMUX_PKG_SERVICE_SCRIPT=("emacsd" 'exec emacs --fg-daemon 2>&1')
-TERMUX_PKG_EXTRA_CONFIGURE_ARGS="                                                           --disable-autodepend
+# enabling cairo causes freezing
+TERMUX_PKG_EXTRA_CONFIGURE_ARGS="
+--disable-autodepend
+--without-cairo
 --without-gconf
---without-gpm                                                                               --without-gsettings
+--without-gpm
+--without-gsettings
 --without-imagemagick
 --without-libotf
 --without-selinux
 --without-xaw3d
 --with-dumping=none
---with-cairo
 --with-dbus
 --with-modules
 --with-pdumper=yes
