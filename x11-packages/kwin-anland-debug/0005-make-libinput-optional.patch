@@ -1,0 +1,115 @@
+From 5413abeb4b46a76b981a20128a56f161db5bdf80 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 6 Jul 2026 00:29:53 +0800
+Subject: [PATCH 05/12] Make libinput optional
+
+---
+ CMakeLists.txt                   | 5 +++--
+ src/backends/CMakeLists.txt      | 4 +++-
+ src/backends/drm/drm_backend.cpp | 6 ++++++
+ src/config-kwin.h.cmake          | 1 +
+ src/tabletmodemanager.cpp        | 4 ++++
+ 5 files changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e2efbb2437..52652bead2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -291,8 +291,9 @@ if (KWIN_BUILD_X11)
+ endif()
+ 
+ find_package(Libinput 1.28)
+-set_package_properties(Libinput PROPERTIES TYPE REQUIRED PURPOSE "Required for input handling on Wayland.")
+-if (Libinput_VERSION VERSION_GREATER_EQUAL 1.30)
++set_package_properties(Libinput PROPERTIES TYPE OPTIONAL PURPOSE "Required for input handling on Wayland.")
++set(HAVE_LIBINPUT ${Libinput_FOUND})
++if (Libinput_FOUND AND Libinput_VERSION VERSION_GREATER_EQUAL 1.30)
+     set(HAVE_LIBINPUT_PLUGINS 1)
+ else()
+     set(HAVE_LIBINPUT_PLUGINS 0)
+diff --git a/src/backends/CMakeLists.txt b/src/backends/CMakeLists.txt
+index 82d377c04a..2b766eae16 100644
+--- a/src/backends/CMakeLists.txt
++++ b/src/backends/CMakeLists.txt
+@@ -1,7 +1,9 @@
+ add_subdirectory(anland)
+ add_subdirectory(drm)
+ add_subdirectory(fakeinput)
+-add_subdirectory(libinput)
++if (Libinput_FOUND)
++    add_subdirectory(libinput)
++endif()
+ add_subdirectory(virtual)
+ add_subdirectory(wayland)
+ if (X11_XCB_FOUND)
+diff --git a/src/backends/drm/drm_backend.cpp b/src/backends/drm/drm_backend.cpp
+index 770f7f0eef..f46caf4cf8 100644
+--- a/src/backends/drm/drm_backend.cpp
++++ b/src/backends/drm/drm_backend.cpp
+@@ -10,7 +10,9 @@
+ 
+ #include "config-kwin.h"
+ 
++#if HAVE_LIBINPUT
+ #include "backends/libinput/libinputbackend.h"
++#endif
+ #include "core/gpumanager.h"
+ #include "core/outputconfiguration.h"
+ #include "core/renderdevice.h"
+@@ -292,7 +294,11 @@ void DrmBackend::updateOutputs(DrmGpu *onlyUpdate)
+ 
+ std::unique_ptr<InputBackend> DrmBackend::createInputBackend()
+ {
++#if HAVE_LIBINPUT
+     return std::make_unique<LibinputBackend>(m_session);
++#else
++    return nullptr;
++#endif
+ }
+ 
+ std::unique_ptr<QPainterBackend> DrmBackend::createQPainterBackend()
+diff --git a/src/config-kwin.h.cmake b/src/config-kwin.h.cmake
+index 58188c0cd8..725bf1e73a 100644
+--- a/src/config-kwin.h.cmake
++++ b/src/config-kwin.h.cmake
+@@ -30,6 +30,7 @@ constexpr QLatin1StringView LIBEXEC_DIR("${CMAKE_INSTALL_FULL_LIBEXECDIR}");
+ #cmakedefine01 HAVE_XKBCOMMON_NO_SECURE_GETENV
+ #cmakedefine01 HAVE_DL_LIBRARY
+ #cmakedefine01 HAVE_LIBDRM_FAUX
++#cmakedefine01 HAVE_LIBINPUT
+ #cmakedefine01 HAVE_LIBINPUT_PLUGINS
+ 
+ constexpr QLatin1StringView XWAYLAND_SESSION_SCRIPTS("${XWAYLAND_SESSION_SCRIPTS}");
+diff --git a/src/tabletmodemanager.cpp b/src/tabletmodemanager.cpp
+index 5e49092e80..4454bd55fc 100644
+--- a/src/tabletmodemanager.cpp
++++ b/src/tabletmodemanager.cpp
+@@ -8,7 +8,9 @@
+ 
+ #include "tabletmodemanager.h"
+ 
++#if HAVE_LIBINPUT
+ #include "backends/libinput/device.h"
++#endif
+ #include "core/inputdevice.h"
+ #include "input.h"
+ #include "input_event.h"
+@@ -22,6 +24,7 @@ namespace KWin
+ 
+ static bool blocksTabletMode(InputDevice *device)
+ {
++#if HAVE_LIBINPUT
+     if (auto libinputDevice = qobject_cast<LibInput::Device *>(device)) {
+         bool ignore = false;
+         if (auto udev = libinput_device_get_udev_device(libinputDevice->device()); udev) {
+@@ -30,6 +33,7 @@ static bool blocksTabletMode(InputDevice *device)
+         }
+         return !ignore;
+     }
++#endif
+ 
+     return false;
+ }
+-- 
+2.47.3
+
