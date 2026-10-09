@@ -2,9 +2,9 @@ TERMUX_PKG_HOMEPAGE=https://github.com/digitalocean/doctl
 TERMUX_PKG_DESCRIPTION="The official command line interface for the DigitalOcean API"
 TERMUX_PKG_LICENSE="Apache-2.0"
 TERMUX_PKG_MAINTAINER="Gouranga Das Samrat <gouranga.das.khulna@gmail.com>"
-TERMUX_PKG_VERSION="1.177.0"
+TERMUX_PKG_VERSION="1.179.0"
 TERMUX_PKG_SRCURL=https://github.com/digitalocean/doctl/archive/refs/tags/v${TERMUX_PKG_VERSION}.tar.gz
-TERMUX_PKG_SHA256=66e8d6b7efe3c27c180402c723a3b68f62f288ea3ab58ca01d65db33747770dd
+TERMUX_PKG_SHA256=3b0a5ba2dbe6edbcd1cdd88fa6dc730ea5eb9768fe21320c08cc38d2ca89b05d
 TERMUX_PKG_AUTO_UPDATE=true
 TERMUX_PKG_BUILD_IN_SRC=true
 
