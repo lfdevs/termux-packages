@@ -1,0 +1,4619 @@
+From ed2a7760c431eb90ca0ced8af1cbe86a4f0da298 Mon Sep 17 00:00:00 2001
+From: superturtlee <160681686+superturtlee@users.noreply.github.com>
+Date: Sun, 5 Jul 2026 21:44:34 +0800
+Subject: [PATCH 03/12] Add support for Anland display daemon
+
+This patch introduces a new complete output backend implementation
+in `src/backends/anland/` to support rendering KWin to the Anland
+display daemon.
+
+Key changes:
+- anland backend: Add the complete implementation of the Anland
+  backend (including output rendering, EGL integration, input event
+  handling, and session management) and integrate it into the CMake
+  build system.
+- anland audio & camera: Implement PipeWire-based audio (playback and
+  capture) and camera engines to bridge host Linux applications and the
+  Android consumer.
+- display_producer: Vendor `libdisplay_producer` and socket utilities
+  to handle the communication protocol with the Anland daemon.
+- main_wayland: Add an `--anland` command-line option and support
+  for the `ANLAND_SOCKET` environment variable to initialize and
+  use the `AnlandBackend`.
+- inputmethod: Introduce `InputMethod::commitText` to allow
+  compositor-side input sources that do not speak `zwp_input_method_v1`
+  (e.g., the Anland Android consumer's keyboard) to inject committed
+  text directly into KWin's input routing.
+
+Based-on-patch:
+https://github.com/superturtlee/anland/blob/5.8/producers/kde/ubuntu2604_v5/kwin.patch
+https://github.com/superturtlee/anland/tree/5.8/producers/kde/anland_backend_v5/src/backends/anland
+
+Co-authored-by: lfdevs <lfdevs@lfdevs.com>
+---
+ src/backends/CMakeLists.txt                |   1 +
+ src/backends/anland/CMakeLists.txt         |  18 +
+ src/backends/anland/anland_audio.c         | 541 +++++++++++++
+ src/backends/anland/anland_audio.h         |  41 +
+ src/backends/anland/anland_backend.cpp     | 745 ++++++++++++++++++
+ src/backends/anland/anland_backend.h       | 130 ++++
+ src/backends/anland/anland_camera.c        | 856 +++++++++++++++++++++
+ src/backends/anland/anland_camera.h        |  54 ++
+ src/backends/anland/anland_egl_backend.cpp | 327 ++++++++
+ src/backends/anland/anland_egl_backend.h   | 101 +++
+ src/backends/anland/anland_input.cpp       | 172 +++++
+ src/backends/anland/anland_input.h         |  72 ++
+ src/backends/anland/anland_logging.cpp     |   8 +
+ src/backends/anland/anland_logging.h       |  10 +
+ src/backends/anland/anland_output.cpp      | 192 +++++
+ src/backends/anland/anland_output.h        |  92 +++
+ src/backends/anland/display_producer.c     | 523 +++++++++++++
+ src/backends/anland/display_producer.h     |  92 +++
+ src/backends/anland/protocol.h             | 194 +++++
+ src/backends/anland/socket_utils.c         | 121 +++
+ src/backends/anland/socket_utils.h         |  18 +
+ src/inputmethod.cpp                        |  10 +
+ src/inputmethod.h                          |   7 +
+ src/main_wayland.cpp                       |  16 +-
+ 24 files changed, 4340 insertions(+), 1 deletion(-)
+ create mode 100644 src/backends/anland/CMakeLists.txt
+ create mode 100644 src/backends/anland/anland_audio.c
+ create mode 100644 src/backends/anland/anland_audio.h
+ create mode 100644 src/backends/anland/anland_backend.cpp
+ create mode 100644 src/backends/anland/anland_backend.h
+ create mode 100644 src/backends/anland/anland_camera.c
+ create mode 100644 src/backends/anland/anland_camera.h
+ create mode 100644 src/backends/anland/anland_egl_backend.cpp
+ create mode 100644 src/backends/anland/anland_egl_backend.h
+ create mode 100644 src/backends/anland/anland_input.cpp
+ create mode 100644 src/backends/anland/anland_input.h
+ create mode 100644 src/backends/anland/anland_logging.cpp
+ create mode 100644 src/backends/anland/anland_logging.h
+ create mode 100644 src/backends/anland/anland_output.cpp
+ create mode 100644 src/backends/anland/anland_output.h
+ create mode 100644 src/backends/anland/display_producer.c
+ create mode 100644 src/backends/anland/display_producer.h
+ create mode 100644 src/backends/anland/protocol.h
+ create mode 100644 src/backends/anland/socket_utils.c
+ create mode 100644 src/backends/anland/socket_utils.h
+
+diff --git a/src/backends/CMakeLists.txt b/src/backends/CMakeLists.txt
+index e94a1c61fe..82d377c04a 100644
+--- a/src/backends/CMakeLists.txt
++++ b/src/backends/CMakeLists.txt
+@@ -1,3 +1,4 @@
++add_subdirectory(anland)
+ add_subdirectory(drm)
+ add_subdirectory(fakeinput)
+ add_subdirectory(libinput)
+diff --git a/src/backends/anland/CMakeLists.txt b/src/backends/anland/CMakeLists.txt
+new file mode 100644
+index 0000000000..c16fc63228
+--- /dev/null
++++ b/src/backends/anland/CMakeLists.txt
+@@ -0,0 +1,18 @@
++target_sources(kwin PRIVATE
++    anland_backend.cpp
++    anland_egl_backend.cpp
++    anland_input.cpp
++    anland_logging.cpp
++    anland_output.cpp
++    # PipeWire audio engine: sink-monitor capture + virtual mic source
++    anland_audio.c
++    # PipeWire camera engine: virtual Video/Source nodes fed by the Android camera
++    anland_camera.c
++    # vendored libdisplay_producer (talks to the Android display daemon)
++    display_producer.c
++    socket_utils.c
++)
++
++target_include_directories(kwin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
++# PkgConfig::PipeWire is already resolved at the top level for the screencast plugin.
++target_link_libraries(kwin PRIVATE Libdrm::Libdrm PkgConfig::PipeWire)
+diff --git a/src/backends/anland/anland_audio.c b/src/backends/anland/anland_audio.c
+new file mode 100644
+index 0000000000..67f325191d
+--- /dev/null
++++ b/src/backends/anland/anland_audio.c
+@@ -0,0 +1,541 @@
++#define _GNU_SOURCE
++#include "anland_audio.h"
++#include "protocol.h"
++
++#include <errno.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <pipewire/pipewire.h>
++#include <spa/param/audio/format-utils.h>
++#include <spa/pod/builder.h>
++#include <spa/utils/hook.h>
++
++/* Default formats until the consumer negotiates the real device formats (protocol.h):
++ * playback stereo L,R, mic mono, both S16LE. */
++#define DEFAULT_RATE          48000
++#define DEFAULT_PLAY_CHANNELS 2
++#define DEFAULT_CAP_CHANNELS  1
++/* ~1s of stereo S16 mic audio; bounds added latency, old samples drop on overflow.
++ * Sized for the worst case (stereo) so the ring never under-allocates. */
++#define MIC_RING_BYTES        (48000 * 2 * (int)sizeof(int16_t))
++#define MAX_DGRAM             (64 * 1024)
++/* Retry cadence after the PipeWire connection is lost (sound service restart, etc). */
++#define RECONNECT_SECS    1
++
++struct anland_audio {
++    struct pw_thread_loop *loop;
++    struct pw_context     *context;
++    struct pw_core        *core;
++    struct spa_hook        core_listener;
++    struct spa_source     *reconnect_timer;
++    bool                   pw_connected;   /* core + streams are up */
++
++    struct pw_stream      *capture;   /* virtual Audio/Sink  -> socket (playback) */
++    struct spa_hook        capture_listener;
++    struct pw_stream      *source;    /* virtual Audio/Source <- socket (capture) */
++    struct spa_hook        source_listener;
++
++    /* Negotiated formats (the consumer owns the hardware and dictates these via
++     * AUDIO_MSG_FORMAT). Defaults stand until the consumer's formats arrive. */
++    uint32_t               play_rate, play_channels;   /* the Audio/Sink format   */
++    uint32_t               cap_rate, cap_channels;      /* the Audio/Source format */
++    /* Requested buffer (frames) per stream from the consumer's latency preset;
++     * 0 = let PipeWire choose the graph quantum. Applied as node.latency. */
++    uint32_t               play_quantum, cap_quantum;
++
++    int                    audio_fd;  /* borrowed; -1 when detached */
++    struct spa_source     *io;        /* loop io source watching audio_fd for reads */
++
++    /* Mic ring buffer. Only ever touched from the loop thread (the io read callback
++     * fills it, the source process callback drains it), so it needs no lock. */
++    uint8_t               *ring;
++    size_t                 ring_size, ring_head, ring_tail, ring_fill;
++
++    uint8_t                rx[MAX_DGRAM];
++};
++
++static struct anland_audio *g_audio = NULL;
++
++static int connect_stream(struct pw_stream *stream, enum spa_direction direction,
++                          uint32_t rate, uint32_t channels, uint32_t quantum);
++static const struct spa_pod *build_format(struct spa_pod_builder *bld,
++                                          uint32_t rate, uint32_t channels);
++static void set_latency(struct pw_stream *stream, uint32_t quantum, uint32_t rate);
++
++/* ---- mic ring buffer (single-threaded: loop thread only) ---- */
++
++static void ring_reset(struct anland_audio *a)
++{
++    a->ring_head = a->ring_tail = a->ring_fill = 0;
++}
++
++static void ring_write(struct anland_audio *a, const uint8_t *p, size_t n)
++{
++    if (n > a->ring_size) {           /* keep only the newest ring_size bytes */
++        p += n - a->ring_size;
++        n = a->ring_size;
++    }
++    if (a->ring_fill + n > a->ring_size) {   /* drop oldest to make room */
++        size_t drop = a->ring_fill + n - a->ring_size;
++        a->ring_tail = (a->ring_tail + drop) % a->ring_size;
++        a->ring_fill -= drop;
++    }
++    size_t first = a->ring_size - a->ring_head;
++    if (first > n)
++        first = n;
++    memcpy(a->ring + a->ring_head, p, first);
++    memcpy(a->ring, p + first, n - first);
++    a->ring_head = (a->ring_head + n) % a->ring_size;
++    a->ring_fill += n;
++}
++
++static size_t ring_read(struct anland_audio *a, uint8_t *p, size_t n)
++{
++    size_t got = n < a->ring_fill ? n : a->ring_fill;
++    size_t first = a->ring_size - a->ring_tail;
++    if (first > got)
++        first = got;
++    memcpy(p, a->ring + a->ring_tail, first);
++    memcpy(p + first, a->ring, got - first);
++    a->ring_tail = (a->ring_tail + got) % a->ring_size;
++    a->ring_fill -= got;
++    return got;
++}
++
++/* ---- stream process callbacks (run on the loop thread, RT context) ---- */
++
++/* Desktop audio captured from the default sink's monitor -> push to the socket so
++ * the consumer plays it. Dropped (still drained) while detached. */
++static void on_capture_process(void *data)
++{
++    struct anland_audio *a = data;
++    struct pw_buffer *b = pw_stream_dequeue_buffer(a->capture);
++    if (!b)
++        return;
++
++    struct spa_data *d = &b->buffer->datas[0];
++    if (d->data && d->chunk->size > 0 && a->audio_fd >= 0) {
++        struct audio_msg h = { .type = AUDIO_MSG_PCM, .size = d->chunk->size };
++        struct iovec iov[2] = {
++            { .iov_base = &h, .iov_len = sizeof(h) },
++            { .iov_base = (uint8_t *)d->data + d->chunk->offset, .iov_len = d->chunk->size },
++        };
++        struct msghdr m = { .msg_iov = iov, .msg_iovlen = 2 };
++        /* Non-blocking: the loop thread must never stall on a slow/dead consumer.
++         * One SEQPACKET datagram per period; drop on EAGAIN. */
++        sendmsg(a->audio_fd, &m, MSG_DONTWAIT | MSG_NOSIGNAL);
++    }
++    pw_stream_queue_buffer(a->capture, b);
++}
++
++/* Fill the virtual mic source from the ring buffer (fed by Android). Silence-pads
++ * when the ring underruns or while detached, so the source never glitches/vanishes. */
++static void on_source_process(void *data)
++{
++    struct anland_audio *a = data;
++    struct pw_buffer *b = pw_stream_dequeue_buffer(a->source);
++    if (!b)
++        return;
++
++    struct spa_data *d = &b->buffer->datas[0];
++    const uint32_t stride = sizeof(int16_t) * a->cap_channels;
++    uint32_t frames = d->maxsize / stride;
++    if (b->requested && b->requested < frames)
++        frames = b->requested;
++    uint32_t bytes = frames * stride;
++
++    size_t got = ring_read(a, d->data, bytes);
++    if (got < bytes)
++        memset((uint8_t *)d->data + got, 0, bytes - got);
++
++    d->chunk->offset = 0;
++    d->chunk->stride = stride;
++    d->chunk->size = bytes;
++    pw_stream_queue_buffer(a->source, b);
++}
++
++static const struct pw_stream_events capture_events = {
++    PW_VERSION_STREAM_EVENTS,
++    .process = on_capture_process,
++};
++
++static const struct pw_stream_events source_events = {
++    PW_VERSION_STREAM_EVENTS,
++    .process = on_source_process,
++};
++
++/* Apply a consumer-announced format. The virtual device stays continuously online
++ * and is hot-plugged (disconnect + reconnect) ONLY when the format actually changes
++ * versus what the stream is currently running -- an unchanged announcement (the common
++ * case, including every consumer reconnect that re-sends the same format) is a no-op,
++ * so the node never churns and plasma-pa keeps resolving the default sink/source.
++ *
++ * Defaults are role-correct: a field left 0 means "device default", which must equal
++ * the value the stream was built with, otherwise the comparison below would treat an
++ * unset field as a change and re-plug on every announcement. (One bug was a CAPTURE
++ * announce with channels==0 defaulting to 2, never matching the mono source.)
++ *
++ * Every change is applied IN PLACE -- the node object (anland-speaker / anland-mic) is
++ * never destroyed, so WirePlumber/plasma-pa keep their default reference and never log
++ * "No object for name anland-speaker". A rate/channels change renegotiates the port
++ * format via pw_stream_update_params(); a quantum-only change (AAudio's framesPerBurst
++ * legitimately varies between opens) just updates node.latency. Neither disconnects.
++ *
++ * Runs on the loop thread, so the pw_stream calls are safe. */
++static void apply_format(struct anland_audio *a, const struct audio_format *f)
++{
++    const bool playback = (f->role == AUDIO_ROLE_PLAYBACK);
++    const uint32_t rate = f->rate ? f->rate : DEFAULT_RATE;
++    const uint32_t channels = f->channels ? f->channels
++                                          : (playback ? DEFAULT_PLAY_CHANNELS : DEFAULT_CAP_CHANNELS);
++
++    uint32_t *cur_rate     = playback ? &a->play_rate : &a->cap_rate;
++    uint32_t *cur_channels = playback ? &a->play_channels : &a->cap_channels;
++    uint32_t *cur_quantum  = playback ? &a->play_quantum : &a->cap_quantum;
++    struct pw_stream *stream = playback ? a->capture : a->source;
++
++    const bool format_changed = (rate != *cur_rate || channels != *cur_channels);
++    const bool quantum_changed = (f->quantum != *cur_quantum);
++    if (!format_changed && !quantum_changed)
++        return;   /* unchanged -> keep the device online, no hot-plug */
++
++    *cur_rate = rate;
++    *cur_channels = channels;
++    *cur_quantum = f->quantum;
++
++    if (!a->pw_connected || !stream)
++        return;   /* build_pw() will pick up the new values when it (re)creates the stream */
++
++    if (format_changed) {
++        /* Renegotiate the port format on the LIVE stream. update_params keeps the node
++         * object alive (same id) and re-runs format negotiation, so the default sink/
++         * source reference is never lost -- no churn, no plasma-pa "No object" spam. */
++        set_latency(stream, f->quantum, rate);
++        uint8_t buffer[1024];
++        struct spa_pod_builder bld = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
++        const struct spa_pod *params[1] = { build_format(&bld, rate, channels) };
++        pw_stream_update_params(stream, params, 1);
++    } else if (f->quantum > 0) {
++        /* Latency-only tweak: node.latency in place, nothing renegotiates. */
++        set_latency(stream, f->quantum, rate);
++    }
++}
++
++/* Mic PCM / format announcements arriving from the consumer. Runs on the loop thread. */
++static void on_audio_readable(void *data, int fd, uint32_t mask)
++{
++    struct anland_audio *a = data;
++    if (mask & (SPA_IO_ERR | SPA_IO_HUP))
++        return;
++    if (!(mask & SPA_IO_IN))
++        return;
++
++    for (;;) {
++        ssize_t n = recv(fd, a->rx, sizeof(a->rx), MSG_DONTWAIT);
++        if (n <= 0)
++            break;
++        if ((size_t)n < sizeof(struct audio_msg))
++            continue;
++        struct audio_msg h;
++        memcpy(&h, a->rx, sizeof(h));
++        size_t avail = (size_t)n - sizeof(struct audio_msg);
++
++        if (h.type == AUDIO_MSG_FORMAT) {
++            if (avail >= sizeof(struct audio_format)) {
++                struct audio_format f;
++                memcpy(&f, a->rx + sizeof(struct audio_msg), sizeof(f));
++                apply_format(a, &f);
++            }
++            continue;
++        }
++        if (h.type != AUDIO_MSG_PCM)
++            continue;
++        size_t size = h.size < avail ? h.size : avail;
++        ring_write(a, a->rx + sizeof(struct audio_msg), size);
++    }
++}
++
++/* ---- PipeWire connection lifecycle (build / teardown / auto-reconnect) ---- */
++
++static void arm_reconnect(struct anland_audio *a)
++{
++    struct timespec val = { .tv_sec = RECONNECT_SECS, .tv_nsec = 0 };
++    pw_loop_update_timer(pw_thread_loop_get_loop(a->loop), a->reconnect_timer,
++                         &val, NULL, false);
++}
++
++/* Fatal, non-recoverable error on the core proxy means the sound service connection
++ * was lost (e.g. pipewire/wireplumber restarted). Drop the dead core+streams and
++ * schedule a rebuild; the audio socket / mic ring are untouched so the consumer side
++ * keeps working and resumes the moment PipeWire is back. */
++static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
++{
++    struct anland_audio *a = data;
++    (void)seq;
++    (void)message;
++    if (id == PW_ID_CORE && res == -EPIPE) {
++        a->pw_connected = false;
++        arm_reconnect(a);   /* teardown + rebuild happens in the timer, not here */
++    }
++}
++
++static const struct pw_core_events core_events = {
++    PW_VERSION_CORE_EVENTS,
++    .error = on_core_error,
++};
++
++/* Build an S16LE EnumFormat POD for rate/channels into the caller's builder. Stereo is
++ * L,R (FL,FR); anything else collapses to a plain mono channel. */
++static const struct spa_pod *build_format(struct spa_pod_builder *bld,
++                                          uint32_t rate, uint32_t channels)
++{
++    struct spa_audio_info_raw info = {
++        .format = SPA_AUDIO_FORMAT_S16_LE,
++        .rate = rate,
++        .channels = channels,
++    };
++    if (channels >= 2) {
++        info.position[0] = SPA_AUDIO_CHANNEL_FL;
++        info.position[1] = SPA_AUDIO_CHANNEL_FR;
++    } else {
++        info.position[0] = SPA_AUDIO_CHANNEL_MONO;
++    }
++    return spa_format_audio_raw_build(bld, SPA_PARAM_EnumFormat, &info);
++}
++
++/* node.latency = "quantum/rate" asks PipeWire to run this node at that buffer size.
++ * quantum == 0 leaves the graph default. Applied in place -- never re-plugs the node. */
++static void set_latency(struct pw_stream *stream, uint32_t quantum, uint32_t rate)
++{
++    if (quantum == 0)
++        return;
++    char latency[32];
++    snprintf(latency, sizeof(latency), "%u/%u", quantum, rate);
++    struct spa_dict_item items[] = {
++        SPA_DICT_ITEM_INIT(PW_KEY_NODE_LATENCY, latency),
++    };
++    struct spa_dict dict = SPA_DICT_INIT(items, 1);
++    pw_stream_update_properties(stream, &dict);
++}
++
++static int connect_stream(struct pw_stream *stream, enum spa_direction direction,
++                          uint32_t rate, uint32_t channels, uint32_t quantum)
++{
++    set_latency(stream, quantum, rate);
++
++    uint8_t buffer[1024];
++    struct spa_pod_builder bld = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
++    const struct spa_pod *params[1] = { build_format(&bld, rate, channels) };
++
++    return pw_stream_connect(stream, direction, PW_ID_ANY,
++                             PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
++                                 PW_STREAM_FLAG_RT_PROCESS,
++                             params, 1);
++}
++
++/* Tear down the core proxy and both streams, leaving the loop, context, timer, mic
++ * ring and audio-socket io source intact. Idempotent. */
++static void teardown_pw(struct anland_audio *a)
++{
++    if (a->capture) {
++        spa_hook_remove(&a->capture_listener);
++        pw_stream_destroy(a->capture);
++        a->capture = NULL;
++    }
++    if (a->source) {
++        spa_hook_remove(&a->source_listener);
++        pw_stream_destroy(a->source);
++        a->source = NULL;
++    }
++    if (a->core) {
++        spa_hook_remove(&a->core_listener);
++        pw_core_disconnect(a->core);
++        a->core = NULL;
++    }
++}
++
++/* (Re)connect the core and (re)create both streams. Returns 0 on success. */
++static int build_pw(struct anland_audio *a)
++{
++    a->core = pw_context_connect(a->context, NULL, 0);
++    if (!a->core)
++        return -1;
++    pw_core_add_listener(a->core, &a->core_listener, &core_events, a);
++
++    /* Own a virtual sink so the container has a real output device instead of only
++     * the auto-null "Dummy Output": apps play into this Audio/Sink, WirePlumber makes
++     * it the default (high priority beats auto_null), and on_capture_process receives
++     * the mixed PCM directly -- no monitor capture, nothing bound to the dummy. */
++    a->capture = pw_stream_new(a->core, "anland-speaker",
++        pw_properties_new(
++            PW_KEY_MEDIA_TYPE, "Audio",
++            PW_KEY_MEDIA_CLASS, "Audio/Sink",
++            PW_KEY_NODE_NAME, "anland-speaker",
++            PW_KEY_NODE_DESCRIPTION, "Anland remote speaker",
++            PW_KEY_PRIORITY_SESSION, "1010",   /* outrank the auto-null dummy sink */
++            PW_KEY_PRIORITY_DRIVER, "1010",
++            NULL));
++    if (!a->capture)
++        return -1;
++    pw_stream_add_listener(a->capture, &a->capture_listener, &capture_events, a);
++
++    /* Expose the Android mic to Linux apps as a recordable source. */
++    a->source = pw_stream_new(a->core, "anland-mic",
++        pw_properties_new(
++            PW_KEY_MEDIA_TYPE, "Audio",
++            PW_KEY_MEDIA_CLASS, "Audio/Source",
++            PW_KEY_NODE_NAME, "anland-mic",
++            PW_KEY_NODE_DESCRIPTION, "Anland remote microphone",
++            PW_KEY_PRIORITY_SESSION, "1010",   /* outrank the auto-null dummy source */
++            PW_KEY_PRIORITY_DRIVER, "1010",
++            NULL));
++    if (!a->source)
++        return -1;
++    pw_stream_add_listener(a->source, &a->source_listener, &source_events, a);
++
++    if (connect_stream(a->capture, PW_DIRECTION_INPUT, a->play_rate, a->play_channels,
++                       a->play_quantum) < 0)
++        return -1;
++    if (connect_stream(a->source, PW_DIRECTION_OUTPUT, a->cap_rate, a->cap_channels,
++                       a->cap_quantum) < 0)
++        return -1;
++
++    return 0;
++}
++
++static void on_reconnect_timer(void *data, uint64_t expirations)
++{
++    struct anland_audio *a = data;
++    (void)expirations;
++    if (a->pw_connected)
++        return;
++
++    teardown_pw(a);            /* clear any half-built state from a failed attempt */
++    if (build_pw(a) == 0) {
++        a->pw_connected = true;
++    } else {
++        teardown_pw(a);
++        arm_reconnect(a);      /* sound service still down -- keep retrying */
++    }
++}
++
++/* ---- public API ---- */
++
++void anland_audio_set_fd(int audio_fd)
++{
++    struct anland_audio *a = g_audio;
++    if (!a)
++        return;
++
++    pw_thread_loop_lock(a->loop);
++
++    struct pw_loop *loop = pw_thread_loop_get_loop(a->loop);
++    if (a->io) {
++        pw_loop_destroy_source(loop, a->io);
++        a->io = NULL;
++    }
++    a->audio_fd = audio_fd;
++    ring_reset(a);   /* drop stale mic audio across a reconnect */
++
++    if (audio_fd >= 0) {
++        /* close=false: the fd is borrowed from display_producer, never closed here.
++         * The consumer announces both device formats (AUDIO_MSG_FORMAT) right after
++         * this socket comes up; on_audio_readable applies them and reconfigures the
++         * PipeWire streams, so we don't dictate any format here. */
++        a->io = pw_loop_add_io(loop, audio_fd, SPA_IO_IN, false, on_audio_readable, a);
++    }
++
++    pw_thread_loop_unlock(a->loop);
++}
++
++int anland_audio_start(void)
++{
++    if (g_audio)
++        return 0;
++
++    pw_init(NULL, NULL);
++
++    struct anland_audio *a = calloc(1, sizeof(*a));
++    if (!a)
++        return -1;
++    a->audio_fd = -1;
++    a->play_rate = DEFAULT_RATE;
++    a->play_channels = DEFAULT_PLAY_CHANNELS;
++    a->cap_rate = DEFAULT_RATE;
++    a->cap_channels = DEFAULT_CAP_CHANNELS;
++    a->ring_size = MIC_RING_BYTES;
++    a->ring = malloc(a->ring_size);
++    if (!a->ring)
++        goto fail;
++
++    a->loop = pw_thread_loop_new("anland-audio", NULL);
++    if (!a->loop)
++        goto fail;
++
++    a->context = pw_context_new(pw_thread_loop_get_loop(a->loop), NULL, 0);
++    if (!a->context)
++        goto fail;
++
++    a->reconnect_timer = pw_loop_add_timer(pw_thread_loop_get_loop(a->loop),
++                                           on_reconnect_timer, a);
++    if (!a->reconnect_timer)
++        goto fail;
++
++    if (pw_thread_loop_start(a->loop) < 0)
++        goto fail;
++
++    /* First connection attempt under the loop lock. If PipeWire is not up yet, fall
++     * back to the reconnect timer instead of failing -- audio will come up when the
++     * sound service appears. Either way the engine object exists. */
++    pw_thread_loop_lock(a->loop);
++    if (build_pw(a) == 0) {
++        a->pw_connected = true;
++    } else {
++        teardown_pw(a);
++        arm_reconnect(a);
++    }
++    pw_thread_loop_unlock(a->loop);
++
++    g_audio = a;
++    return 0;
++
++fail:
++    if (a->loop)
++        pw_thread_loop_destroy(a->loop);
++    if (a->context)
++        pw_context_destroy(a->context);
++    free(a->ring);
++    free(a);
++    pw_deinit();
++    return -1;
++}
++
++void anland_audio_stop(void)
++{
++    struct anland_audio *a = g_audio;
++    if (!a)
++        return;
++    g_audio = NULL;
++
++    if (a->loop)
++        pw_thread_loop_stop(a->loop);
++    teardown_pw(a);
++    if (a->io)
++        pw_loop_destroy_source(pw_thread_loop_get_loop(a->loop), a->io);
++    if (a->reconnect_timer)
++        pw_loop_destroy_source(pw_thread_loop_get_loop(a->loop), a->reconnect_timer);
++    if (a->context)
++        pw_context_destroy(a->context);
++    if (a->loop)
++        pw_thread_loop_destroy(a->loop);
++    free(a->ring);
++    free(a);
++    pw_deinit();
++}
+diff --git a/src/backends/anland/anland_audio.h b/src/backends/anland/anland_audio.h
+new file mode 100644
+index 0000000000..5acf1f1aa8
+--- /dev/null
++++ b/src/backends/anland/anland_audio.h
+@@ -0,0 +1,41 @@
++#ifndef ANLAND_AUDIO_H
++#define ANLAND_AUDIO_H
++
++/*
++ * Producer-side audio engine.
++ *
++ * Owns a persistent PipeWire thread-loop with two streams that live for the whole
++ * KWin session, independent of whether a consumer is connected:
++ *
++ *   - a sink-monitor capture stream  -> desktop playback PCM written to the audio
++ *                                        socket (heard on the Android speaker);
++ *   - a virtual Audio/Source stream  <- microphone PCM read from the audio socket
++ *                                        (so Linux apps can record the Android mic).
++ *
++ * The streams are NEVER torn down on consumer disconnect: while detached the capture
++ * stream simply drops its PCM and the source feeds silence, so PipeWire (and every
++ * recording app) never sees the device disappear. Only the socket fd is hot-swapped:
++ * anland_audio_set_fd(fd) on (re)connect, anland_audio_set_fd(-1) on fallback. The fd
++ * is borrowed -- the engine never closes it (display_producer owns its lifetime).
++ */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Create the thread-loop and both streams. Returns 0 on success, -1 on failure.
++ * Idempotent: a second call while already started is a no-op returning 0. */
++int  anland_audio_start(void);
++
++/* Stop and destroy the engine. Safe to call when not started. */
++void anland_audio_stop(void);
++
++/* Point the engine at the current audio socket, or -1 to detach (drop/silence).
++ * Re-pointing resets the mic buffer and re-announces the playback format. */
++void anland_audio_set_fd(int audio_fd);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+new file mode 100644
+index 0000000000..c44ee98fe5
+--- /dev/null
++++ b/src/backends/anland/anland_backend.cpp
+@@ -0,0 +1,745 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#include "anland_backend.h"
++#include "anland_audio.h"
++#include "anland_camera.h"
++#include "anland_egl_backend.h"
++#include "anland_input.h"
++#include "anland_logging.h"
++#include "anland_output.h"
++
++#include "core/drmdevice.h"
++#include "core/renderdevice.h"
++#include "core/renderloop.h"
++#include "inputmethod.h"
++#include "main.h"
++#include "opengl/egldisplay.h"
++#include "utils/filedescriptor.h"
++#include "utils/pipe.h"
++#include "wayland/abstract_data_source.h"
++#include "wayland/display.h"
++#include "wayland/seat.h"
++#include "wayland_server.h"
++
++#include <QFutureWatcher>
++#include <QScopeGuard>
++#include <QSocketNotifier>
++#include <QTimer>
++#include <QtConcurrent>
++
++#include <xf86drm.h>
++
++#include <fcntl.h>
++#include <poll.h>
++#include <sys/eventfd.h>
++#include <unistd.h>
++
++#ifndef EGL_PLATFORM_SURFACELESS_MESA
++#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
++#endif
++
++namespace KWin
++{
++
++static const QString s_defaultSocketPath = QStringLiteral("/tmp/display_daemon.sock");
++static const int s_reconnectIntervalMs = 200;
++
++/*
++ * KWin needs a DRM render device for the GL/EGL path (syncobj timelines, dmabuf
++ * feedback). The anland backend renders surfaceless and imports the daemon's
++ * dmabufs, so any usable render node works. Prefer an explicit override
++ * ($ANLAND_DRM_DEVICE), then the first enumerated render node (as the virtual
++ * backend does), then the standard render node — which on the kgsl/turnip stack
++ * is the msm node exposed at /dev/dri/renderD128.
++ */
++static std::unique_ptr<RenderDevice> createRenderDevice(const QString &path)
++{
++    auto drmDevice = DrmDevice::open(path);
++    if (!drmDevice) {
++        return nullptr;
++    }
++
++    auto eglDisplay = EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr), drmDevice.get());
++    if (!eglDisplay) {
++        return nullptr;
++    }
++
++    return std::make_unique<RenderDevice>(std::move(drmDevice), std::move(eglDisplay));
++}
++
++static std::unique_ptr<RenderDevice> openRenderDevice()
++{
++    const QString override = qEnvironmentVariable("ANLAND_DRM_DEVICE");
++    if (!override.isEmpty()) {
++        if (auto dev = createRenderDevice(override)) {
++            return dev;
++        }
++        qCWarning(KWIN_ANLAND) << "ANLAND_DRM_DEVICE" << override << "could not be opened";
++    }
++
++    const int count = drmGetDevices2(0, nullptr, 0);
++    if (count > 0) {
++        QList<drmDevice *> devices(count);
++        if (drmGetDevices2(0, devices.data(), devices.size()) >= 0) {
++            auto guard = qScopeGuard([&] {
++                drmFreeDevices(devices.data(), devices.size());
++            });
++            for (drmDevice *device : std::as_const(devices)) {
++                if (device->available_nodes & (1 << DRM_NODE_RENDER)) {
++                    if (auto dev = createRenderDevice(QString::fromUtf8(device->nodes[DRM_NODE_RENDER]))) {
++                        return dev;
++                    }
++                }
++            }
++        }
++    }
++
++    return createRenderDevice(QStringLiteral("/dev/dri/renderD128"));
++}
++
++AnlandBackend::AnlandBackend(const QString &socketPath, QObject *parent)
++    : OutputBackend(parent)
++    , m_socketPath(socketPath.isEmpty() ? s_defaultSocketPath : socketPath)
++{
++}
++
++AnlandBackend::~AnlandBackend()
++{
++    teardownNotifiers();
++    // Stop the audio engine before disconnect() closes the audio fd it borrows.
++    anland_audio_stop();
++    // Stop the camera engine (it owns its own resource fds; closes them itself).
++    anland_camera_stop();
++    if (m_reconnectTimer) {
++        m_reconnectTimer->stop();
++    }
++    // m_outputs are QObject children of this backend; ~QObject deletes them.
++    m_outputs.clear();
++    m_inputDevice.reset();
++    if (m_display) {
++        ::disconnect(m_display); // C producer API, not QObject::disconnect
++        m_display = nullptr;
++    }
++    // m_renderDevice owns the EglDisplay; the 5.27-era manual
++    // eglTerminate(sceneEglDisplay()) is no longer needed.
++}
++
++bool AnlandBackend::initialize()
++{
++    if (connect_to_deamon(&m_display, m_socketPath.toLocal8Bit().constData()) < 0) {
++        qCWarning(KWIN_ANLAND) << "failed to connect to display daemon at" << m_socketPath;
++        return false;
++    }
++
++    set_fallback_callback(m_display, &AnlandBackend::fallbackTrampoline, this);
++
++    uint32_t w = 0, h = 0, fmt = 0, refresh = 0;
++    get_screen_info(m_display, &w, &h, &fmt, &refresh);
++    qCInfo(KWIN_ANLAND) << "connected to daemon at" << m_socketPath
++                        << "screen" << w << "x" << h << "refresh" << refresh << "mHz";
++
++    if (w == 0 || h == 0) {
++        qCWarning(KWIN_ANLAND) << "daemon reported invalid screen size";
++        return false;
++    }
++
++    // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
++    // setup; without a real device it segfaults. Open one up front.
++    m_renderDevice = openRenderDevice();
++    if (!m_renderDevice) {
++        qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
++        return false;
++    }
++
++    m_inputDevice = std::make_unique<AnlandInputDevice>();
++
++    auto *output = new AnlandOutput(this, QStringLiteral("anland-1"));
++    output->init(QSize(w, h), static_cast<int>(refresh), 1.0);
++    m_outputs.append(output);
++    Q_EMIT outputAdded(output);
++    output->updateEnabled(true);
++    Q_EMIT outputsQueried();
++
++    m_reconnectTimer = new QTimer(this);
++    m_reconnectTimer->setInterval(s_reconnectIntervalMs);
++    connect(m_reconnectTimer, &QTimer::timeout, this, &AnlandBackend::onReconnectTimer);
++
++    // Bring up the audio engine up front: its PipeWire sink-monitor capture and
++    // virtual mic Source live for the whole session, independent of the consumer,
++    // so Linux apps never see the devices appear/disappear as the consumer comes and
++    // goes. The socket fd is attached later (onReconnectTimer) and detached in
++    // enterFallback(). Audio is non-critical, so a failure here is not fatal.
++    if (anland_audio_start() < 0) {
++        qCWarning(KWIN_ANLAND) << "failed to start audio engine; continuing without audio";
++    }
++
++    // The camera engine is NOT started here: its PipeWire thread-loop is brought up
++    // lazily on the first resource delivery (anland_camera_set_resources), i.e. only
++    // once a consumer with the camera enabled actually hands over its fds. The backend
++    // requests SERVICE_TYPE_CAMERA on every reconnect (onReconnectTimer); a consumer
++    // that has the camera disabled never replies, so the engine never starts.
++
++    // connect_to_deamon() only fetched screen info; the context is still in
++    // fallback with no consumer fds or dmabufs. Enter fallback explicitly so the
++    // reconnect timer starts and discovers the consumer via try_exit_fallback().
++    enterFallback();
++
++    // Connect to KWin's clipboard change signal once.  The handler is guarded
++    // by m_inFallback so it only fires when a consumer is connected.
++    if (SeatInterface *seat = waylandServer()->seat()) {
++        connect(seat, &SeatInterface::selectionChanged, this, [this](AbstractDataSource *) {
++            onClipboardChanged();
++        });
++    }
++
++    return true;
++}
++
++std::unique_ptr<EglBackend> AnlandBackend::createOpenGLBackend()
++{
++    return std::make_unique<AnlandEglBackend>(this);
++}
++
++std::unique_ptr<InputBackend> AnlandBackend::createInputBackend()
++{
++    return std::make_unique<AnlandInputBackend>(this);
++}
++
++QList<CompositingType> AnlandBackend::supportedCompositors() const
++{
++    return QList<CompositingType>{OpenGLCompositing};
++}
++
++QList<BackendOutput *> AnlandBackend::outputs() const
++{
++    QList<BackendOutput *> ret;
++    ret.reserve(m_outputs.size());
++    for (AnlandOutput *output : m_outputs) {
++        ret.append(output);
++    }
++    return ret;
++}
++
++EglDisplay *AnlandBackend::sceneEglDisplayObject() const
++{
++    return m_renderDevice ? m_renderDevice->eglDisplay() : nullptr;
++}
++
++bool AnlandBackend::notifyFramePresented()
++{
++    if (m_consumerReady) {
++        trigger_refresh(m_display);
++        m_consumerReady = false;
++        return true;
++    }
++    return false;
++}
++
++void AnlandBackend::setupNotifiers()
++{
++    teardownNotifiers();
++
++    const int dataFd = get_data_fd(m_display);
++    if (dataFd >= 0) {
++        m_inputNotifier = new QSocketNotifier(dataFd, QSocketNotifier::Read, this);
++        connect(m_inputNotifier, &QSocketNotifier::activated, this, [this]() {
++            onInputReadable();
++        });
++    }
++
++    const int bufReadyFd = get_buffer_ready_fd(m_display);
++    if (bufReadyFd >= 0) {
++        m_bufReadyNotifier = new QSocketNotifier(bufReadyFd, QSocketNotifier::Read, this);
++        connect(m_bufReadyNotifier, &QSocketNotifier::activated, this, [this]() {
++            onBufferReady();
++        });
++    }
++}
++
++void AnlandBackend::teardownNotifiers()
++{
++    if (m_inputNotifier) {
++        m_inputNotifier->setEnabled(false);
++        m_inputNotifier->deleteLater();
++        m_inputNotifier = nullptr;
++    }
++    if (m_bufReadyNotifier) {
++        m_bufReadyNotifier->setEnabled(false);
++        m_bufReadyNotifier->deleteLater();
++        m_bufReadyNotifier = nullptr;
++    }
++}
++
++void AnlandBackend::onInputReadable()
++{
++    if (m_inFallback) return;
++
++    InputEvent ev;
++    while (poll_input_event(m_display, &ev, 0) > 0) {
++        processInputEvent(ev);
++        if (m_inFallback) break; // poll_input_event may have triggered fallback
++    }
++}
++
++QPointF AnlandBackend::mapInputToLogical(const QPointF &devicePoint) const
++{
++    AnlandOutput *output = m_outputs[0];
++    // The compositor maps logical -> device with transform().map(p, pixelSize()),
++    // so the inverse maps device -> logical with the inverted transform bounded by
++    // the device-space size (modeSize, the buffer's native landscape extent).
++    // Then divide out the output scale to land in global logical coordinates.
++    const QPointF logical = output->transform().inverted().map(devicePoint, QSizeF(output->modeSize()));
++    return logical / output->scale();
++}
++
++void AnlandBackend::processInputEvent(const InputEvent &ev)
++{
++    if (!m_inputDevice) {
++        return;
++    }
++
++    switch (ev.type) {
++    case INPUT_TYPE_POINTER_MOTION: {
++        // Both absolute position (x, y) and relative delta (dx, dy) come from the
++        // consumer. Use the same mapInputToLogical for both so that dx/dy delivered
++        // via wl_pointer.relative_motion match the cursor's position space, giving
++        // Wayland clients correct velocity for momentum/kinetic scrolling.
++        const QPointF pos = mapInputToLogical(QPointF(ev.pointer_motion.x, ev.pointer_motion.y));
++        const QPointF delta = mapInputToLogical(QPointF(ev.pointer_motion.dx, ev.pointer_motion.dy));
++        m_inputDevice->pointerMotion(pos, delta, delta);
++        break;
++    }
++    case INPUT_TYPE_POINTER_BUTTON:
++        m_inputDevice->pointerButton(ev.pointer_button.button, ev.pointer_button.pressed != 0);
++        break;
++    case INPUT_TYPE_POINTER_AXIS: {
++        // protocol axis: 0 = vertical scroll, 1 = horizontal scroll (wayland order)
++        const PointerAxis axis =
++            ev.pointer_axis.axis == 0 ? PointerAxis::Vertical : PointerAxis::Horizontal;
++        m_inputDevice->pointerAxis(axis, ev.pointer_axis.value, ev.pointer_axis.discrete * 120);
++        break;
++    }
++    case INPUT_TYPE_KEY:
++        m_inputDevice->keyboardKey(ev.key.keycode, ev.key.action == INPUT_ACTION_DOWN);
++        break;
++    case INPUT_TYPE_TOUCH: {
++        const QPointF pos = mapInputToLogical(QPointF(ev.touch.x, ev.touch.y));
++        switch (ev.touch.action) {
++        case INPUT_ACTION_DOWN:
++            m_inputDevice->touchDown(ev.touch.pointer_id, pos);
++            break;
++        case INPUT_ACTION_UP:
++            m_inputDevice->touchUp(ev.touch.pointer_id);
++            break;
++        case INPUT_ACTION_MOVE:
++            m_inputDevice->touchMotion(ev.touch.pointer_id, pos);
++            break;
++        default:
++            break;
++        }
++        break;
++    }
++    case INPUT_TYPE_TOUCH_FRAME:
++        m_inputDevice->touchFrame();
++        break;
++    case INPUT_TYPE_DISPLAY_REFRESH:
++        // Not an input event: the consumer reports its live display refresh rate
++        // (mHz) so we can repace the RenderLoop. m_outputs[0] is valid here (used
++        // for scale above).
++        m_outputs[0]->setRefreshRate(static_cast<int>(ev.display.refresh_mhz));
++        break;
++    case INPUT_TYPE_CLIPBOARD: {
++        // The clipboard event carries the raw text data as inline payload after the
++        // InputEvent header.  ev.clipboard.size tells us how many bytes follow.
++        const uint32_t size = ev.clipboard.size;
++        if (size == 0)
++            break;
++        QByteArray text(static_cast<int>(size), Qt::Uninitialized);
++        if (poll_input_event_extend_data(m_display, text.data(), size, 5000) == 1) {
++            sendClipboardToKWin(text);
++        }
++        break;
++    }
++    case INPUT_TYPE_TEXT_INPUT: {
++        // The text input event carries the raw text data as inline payload after
++        // the InputEvent header.  ev.text_input.size tells us how many bytes follow.
++        const uint32_t size = ev.text_input.size;
++        if (size == 0)
++            break;
++        QByteArray text(static_cast<int>(size), Qt::Uninitialized);
++        if (poll_input_event_extend_data(m_display, text.data(), size, 5000) == 1) {
++            sendTextInputToKWin(text);
++        }
++        break;
++    }
++    case INPUT_TYPE_RESOURCE: {
++        // The consumer is handing back the fds for a service we requested. The fdnum
++        // fds follow as a separate DATA_MSG_INPUT_EXTEND_FDS message; receive them now
++        // (synchronously, before the next poll_input_event) and route to the engine.
++        const uint32_t service = ev.resource.type;
++        const uint32_t fdnum = ev.resource.fdnum;
++        constexpr int kMaxFds = 1 + 8; // ctrl + up to MAX_CAMERAS streams
++        if (fdnum == 0 || fdnum > kMaxFds)
++            break;
++        int fds[kMaxFds];
++        int got = 0;
++        if (poll_input_event_extend_fds(m_display, fds, static_cast<int>(fdnum), &got, 5000) != 1
++            || got < static_cast<int>(fdnum)) {
++            for (int i = 0; i < got; i++)
++                ::close(fds[i]);
++            break;
++        }
++        if (service == SERVICE_TYPE_CAMERA) {
++            // fds[0] = shared control socket, fds[1..] = per-camera stream sockets.
++            anland_camera_set_resources(fds[0], &fds[1], got - 1);
++        } else {
++            for (int i = 0; i < got; i++)
++                ::close(fds[i]);
++        }
++        break;
++    }
++    default:
++        break;
++    }
++}
++
++void AnlandBackend::onBufferReady()
++{
++    if (m_inFallback) {
++        return;
++    }
++
++    // The dmabuf set is already in hand (try_exit_fallback() received it when we
++    // left fallback), so buffer-ready is purely a frame-completion signal: drain
++    // the eventfd and pace the render cycle.
++    const int fd = get_buffer_ready_fd(m_display);
++    if (fd >= 0) {
++        eventfd_t val;
++        eventfd_read(fd, &val);
++    }
++
++    m_consumerReady = true;
++
++    // Buffer-ready is our frame-completion signal: complete the in-flight frame
++    // (if any) and schedule the next one, keeping the render cycle paced by the
++    // consumer rather than a timer.
++    m_outputs[0]->onConsumerReady();
++}
++
++void AnlandBackend::fallbackTrampoline(void *data)
++{
++    static_cast<AnlandBackend *>(data)->enterFallback();
++}
++
++void AnlandBackend::enterFallback()
++{
++    if (m_inFallback) {
++        return;
++    }
++    qCWarning(KWIN_ANLAND) << "consumer disconnected, entering fallback";
++
++    if (m_inputDevice) {
++        m_inputDevice->touchCancel();
++    }
++
++    // A frame may be in flight awaiting a buffer-ready that will never come now;
++    // fail it so the RenderLoop's frame accounting does not stall.
++    m_outputs[0]->stopRendering();
++
++    teardownNotifiers();
++
++    // Renderer is stopped: drop the imported dmabuf set now that the producer's fds
++    // are gone. The layer is null at startup (no GL backend attached yet).
++    if (AnlandEglLayer *layer = m_outputs[0]->eglLayer()) {
++        layer->releaseBuffers();
++    }
++
++    m_consumerReady = false;
++    m_inFallback = true;
++
++    // Detach the audio socket: the streams keep running (capture drops its PCM, the
++    // mic Source feeds silence) so PipeWire never perceives the disconnect.
++    anland_audio_set_fd(-1);
++
++    // The consumer's camera fds are now dead: stop recording, destroy the virtual
++    // camera nodes and close the fds. New ones arrive on the next reconnect.
++    anland_camera_clear();
++
++    if (m_reconnectTimer) {
++        m_reconnectTimer->start();
++    }
++}
++
++void AnlandBackend::onReconnectTimer()
++{
++    if (!m_inFallback) {
++        m_reconnectTimer->stop();
++        return;
++    }
++
++    if (try_exit_fallback(m_display) != 0) {
++        return; // still down, keep retrying
++    }
++
++    qCInfo(KWIN_ANLAND) << "consumer reconnected";
++    m_inFallback = false;
++    m_consumerReady = false;
++    m_reconnectTimer->stop();
++
++    // try_exit_fallback() already received a fresh dmabuf set. Import it into the
++    // layer (which arms an infinite/full-output repaint on every rotation buffer),
++    // resume the RenderLoop (uninhibit, balancing the inhibit from onConsumerLost),
++    // and mark the layer dirty. scheduleRepaint() keeps the layer's needsRepaint()
++    // true so the next composite() paints into the new dmabufs even on an idle
++    // desktop. resumeRendering() runs unconditionally to keep inhibit/uninhibit
++    // balanced regardless of whether the GL layer is attached yet.
++    AnlandEglLayer *layer = m_outputs[0]->eglLayer();
++    if (layer) {
++        layer->importBuffers(get_buf_count(m_display));
++    }
++    setupNotifiers();
++    // Attach the fresh audio socket (a new socketpair was installed by pickup_fds).
++    anland_audio_set_fd(get_audio_fd(m_display));
++    // Render loop is resuming and the data channel is live: immediately request the
++    // camera service. The consumer replies asynchronously with an INPUT_TYPE_RESOURCE
++    // event whose fds onInputReadable() hands to the camera engine. If the consumer
++    // has the camera disabled it simply never registers the service and never replies,
++    // so this is a harmless no-op in that case.
++    push_resources_request(m_display, SERVICE_TYPE_CAMERA, nullptr);
++    m_outputs[0]->resumeRendering();
++    if (layer) {
++        layer->scheduleRepaint(nullptr);
++    }
++}
++
++// ---------------------------------------------------------------------------
++// Clipboard sync
++// ---------------------------------------------------------------------------
++
++/*
++ * Pipe-based helper: poll() the read-end of a pipe with a timeout, accumulating
++ * data until EOF (the remote side closes its write-end).  Returns the collected
++ * bytes or an empty QByteArray on error / timeout.
++ */
++static QByteArray readDataFromFd(FileDescriptor &fd)
++{
++    QByteArray buffer;
++    pollfd pfd{};
++    pfd.fd = fd.get();
++    pfd.events = POLLIN;
++
++    while (true) {
++        const int ready = poll(&pfd, 1, 1000);
++        if (ready < 0) {
++            if (errno != EINTR)
++                return QByteArray();
++        } else if (ready == 0) {
++            return QByteArray(); // timeout
++        } else {
++            char chunk[4096];
++            const ssize_t n = read(fd.get(), chunk, sizeof(chunk));
++            if (n < 0)
++                return QByteArray();
++            if (n == 0)
++                return buffer;
++            buffer.append(chunk, n);
++        }
++    }
++}
++
++/*
++ * Ask a Wayland AbstractDataSource (the clipboard selection) to serve its
++ * text/plain content into a pipe.  Picks text/plain;charset=utf-8 preferentially,
++ * falls back to text/plain.  Returns the pipe's read endpoint that the caller
++ * should drain with readDataFromFd(), or nullopt if nothing useful is available.
++ *
++ * This touches the Wayland server (requestData/flush) and so must run on the
++ * compositor's main thread; the blocking drain of the returned fd can then be
++ * handed off to a worker thread.
++ */
++static std::optional<FileDescriptor> requestClipboardData(AbstractDataSource *source)
++{
++    if (!source)
++        return std::nullopt;
++
++    const QStringList types = source->mimeTypes();
++    QString mimeType;
++    if (types.contains(QStringLiteral("text/plain;charset=utf-8")))
++        mimeType = QStringLiteral("text/plain;charset=utf-8");
++    else if (types.contains(QStringLiteral("text/plain")))
++        mimeType = QStringLiteral("text/plain");
++    else
++        return std::nullopt; // no text type available
++
++    std::optional<Pipe> pipe = Pipe::create(O_CLOEXEC);
++    if (!pipe)
++        return std::nullopt;
++
++    source->requestData(mimeType, std::move(pipe->writeEndpoint));
++    waylandServer()->display()->flush();
++    return std::move(pipe->readEndpoint);
++}
++
++/*
++ * Called whenever KWin's SeatInterface::selectionChanged fires.
++ * Reads the new clipboard content and pushes it to the consumer.
++ * De-duplicates: if the text is identical to the last known value, the
++ * send is skipped (avoids the consumer re-posting the same text back to KWin).
++ */
++void AnlandBackend::onClipboardChanged()
++{
++    if (m_inFallback)
++        return;
++
++    AbstractDataSource *source = waylandServer()->seat()->selection();
++    std::optional<FileDescriptor> readFd = requestClipboardData(source);
++    if (!readFd)
++        return;
++    // Draining the pipe can block for up to a second waiting for the owning
++    // client to serve the data. Do it on a worker thread so the compositor's
++    // main loop never stalls, then deliver the result back here.
++    auto *watcher = new QFutureWatcher<QByteArray>(this);
++    connect(watcher, &QFutureWatcher<QByteArray>::finished, this, [this, watcher]() {
++        watcher->deleteLater();
++        if (m_inFallback)
++            return;
++
++        const QByteArray text = watcher->result();
++        if (text == m_clipboardText)
++            return; // already in sync
++
++        m_clipboardText = text;
++        sendClipboardToConsumer(text);
++    });
++    watcher->setFuture(QtConcurrent::run([fd = std::move(*readFd)]() mutable {
++        return readDataFromFd(fd);
++    }));
++}
++
++/*
++ * Push clipboard text to the Android consumer via the data channel.
++ * Uses the variable-length INPUT_TYPE_CLIPBOARD event (header + raw UTF-8).
++ * An empty text clears the remote clipboard.
++ */
++void AnlandBackend::sendClipboardToConsumer(const QByteArray &text)
++{
++    if (m_inFallback)
++        return;
++
++    const uint32_t len = static_cast<uint32_t>(text.size());
++    const OutputEvent ev = {
++        .type = OUTPUT_TYPE_CLIPBOARD,
++        .clipboard = { .size = len },
++    };
++    push_output_event_with_length(m_display, &ev,
++                                  const_cast<char *>(text.constData()), len);
++}
++
++/*
++ * Called from processInputEvent() when the consumer pushes clipboard data to us.
++ * Reads the trailing payload, then sets the KWin Wayland selection to that text
++ * so all Wayland clients see the change.
++ * De-duplicates: if the incoming text matches our m_clipboardText, we skip the
++ * setSelection() call to avoid a feedback loop.
++ */
++void AnlandBackend::sendClipboardToKWin(const QByteArray &text)
++{
++    if (text == m_clipboardText)
++        return; // already in sync — skip to break the loop
++
++    m_clipboardText = text;
++
++    if (!waylandServer())
++        return;
++
++    SeatInterface *seat = waylandServer()->seat();
++    if (!seat)
++        return;
++
++    // Build a minimal QMimeData + AbstractDataSource to feed setSelection().
++    // The source wraps the data; setSelection() tells all wl_data_device listeners
++    // about the new clipboard content.
++    auto *mimeData = new QMimeData();
++    mimeData->setData(QStringLiteral("text/plain;charset=utf-8"), text);
++
++    // ClipboardDataSource lives in the QPA plugin namespace; re-create the same
++    // pattern inline since it is a trivial AbstractDataSource subclass.
++    class AnlandClipboardSource : public AbstractDataSource {
++    public:
++        explicit AnlandClipboardSource(QMimeData *data, QObject *parent = nullptr)
++            : AbstractDataSource(parent), m_data(data) {}
++        void requestData(const QString &mimeType, FileDescriptor fd) override
++        {
++            const QByteArray buf = m_data->data(mimeType);
++            // Write asynchronously — the read side is blocked until EOF.
++            QtConcurrent::run([buf, fd = std::move(fd)]() mutable {
++                size_t remaining = buf.size();
++                const char *ptr = buf.constData();
++                pollfd pfd{};
++                pfd.fd = fd.get();
++                pfd.events = POLLOUT;
++                while (remaining > 0) {
++                    if (poll(&pfd, 1, 5000) <= 0)
++                        break;
++                    if (!(pfd.revents & POLLOUT))
++                        break;
++                    ssize_t n = write(fd.get(), ptr, remaining);
++                    if (n <= 0)
++                        break;
++                    ptr += n;
++                    remaining -= n;
++                }
++            });
++        }
++        void cancel() override {}
++        QStringList mimeTypes() const override { return m_data->formats(); }
++    private:
++        QMimeData *m_data;
++    };
++
++    auto *source = new AnlandClipboardSource(mimeData, mimeData);
++    seat->setSelection(source, waylandServer()->display()->nextSerial());
++    // seat->setSelection() takes a raw pointer; it is released when the next
++    // selection replaces it, or when the seat is torn down.  We parent the source
++    // to mimeData so it is freed when mimeData goes away — but since setSelection()
++    // holds a raw pointer, keep both alive for the lifetime of the seat's selection.
++    // Parent the source to the seat to ensure it outlives the selection reference.
++    source->setParent(seat);
++}
++
++// ---------------------------------------------------------------------------
++// Text input
++// ---------------------------------------------------------------------------
++
++/*
++ * Inject UTF-8 text the consumer's IME committed into the focused KWin client.
++ *
++ * The pipeline is IME -> compositor -> app. The consumer's Android keyboard is
++ * the IME; this hands the committed text to KWin's InputMethod at exactly the
++ * point a zwp_input_method_v1 commit_string arrives (InputMethod::commitText ->
++ * commitString). KWin then owns delivery: to the focused text-input client
++ * (text-input v1/v2/v3, carrying CJK / emoji) or as synthesized key events when
++ * the client has no text-input interface. We deliberately do not write to the
++ * client's text-input ourselves — this code is not the compositor's IME router.
++ */
++void AnlandBackend::sendTextInputToKWin(const QByteArray &text)
++{
++    if (m_inFallback)
++        return;
++
++    const QString str = QString::fromUtf8(text);
++    if (str.isEmpty())
++        return;
++
++    if (InputMethod *im = kwinApp()->inputMethod()) {
++        im->commitText(str);
++    }
++}
++
++} // namespace KWin
++
++#include "moc_anland_backend.cpp"
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+new file mode 100644
+index 0000000000..f78b2434d1
+--- /dev/null
++++ b/src/backends/anland/anland_backend.h
+@@ -0,0 +1,130 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++
++    Native KWin output+input backend that talks to the Android display daemon
++    directly (via libdisplay_producer), instead of running nested inside the
++    weston "anland" compositor. Port of weston/libweston/backend-anland/anland.c
++    to KWin's OutputBackend architecture.
++*/
++#pragma once
++
++#include "core/outputbackend.h"
++#include "core/renderdevice.h"
++
++#include <QByteArray>
++#include <QPointF>
++#include <QVector>
++#include <memory>
++
++extern "C" {
++#include "display_producer.h"
++#include "protocol.h"
++}
++
++class QSocketNotifier;
++class QTimer;
++
++namespace KWin
++{
++
++class AnlandOutput;
++class AnlandInputDevice;
++class BackendOutput;
++class DrmDevice;
++class EglBackend;
++class EglDisplay;
++class InputBackend;
++class RenderDevice;
++
++class KWIN_EXPORT AnlandBackend : public OutputBackend
++{
++    Q_OBJECT
++
++public:
++    explicit AnlandBackend(const QString &socketPath = QString(), QObject *parent = nullptr);
++    ~AnlandBackend() override;
++
++    bool initialize() override;
++
++    std::unique_ptr<EglBackend> createOpenGLBackend() override;
++    std::unique_ptr<InputBackend> createInputBackend() override;
++    QList<CompositingType> supportedCompositors() const override;
++    QList<BackendOutput *> outputs() const override;
++
++    EglDisplay *sceneEglDisplayObject() const override;
++    RenderDevice *renderDevice() const
++    {
++        return m_renderDevice.get();
++    }
++
++    display_ctx *display() const
++    {
++        return m_display;
++    }
++    DrmDevice *drmDevice() const
++    {
++        return m_renderDevice ? m_renderDevice->drmDevice() : nullptr;
++    }
++    AnlandInputDevice *inputDevice() const
++    {
++        return m_inputDevice.get();
++    }
++
++    bool notifyFramePresented();
++
++    /** Re-run the Workspace output layout after an output changed its mode at
++     *  runtime (AnlandOutput::resize). The backend mutates the mode directly via
++     *  setState() instead of going through OutputConfiguration, so — exactly like
++     *  DrmBackend/VirtualBackend do after altering their output set — it must emit
++     *  outputsQueried() itself. Otherwise Workspace::updateOutputs() never runs and
++     *  windows keep their old geometry (the mode-changed signal alone does not
++     *  trigger a relayout). */
++    void notifyOutputsChanged()
++    {
++        Q_EMIT outputsQueried();
++    }
++
++private:
++    void setupNotifiers();
++    void teardownNotifiers();
++    void onInputReadable();
++    void onBufferReady();
++    void processInputEvent(const InputEvent &ev);
++    QPointF mapInputToLogical(const QPointF &devicePoint) const;
++    void onReconnectTimer();
++    void enterFallback();
++
++    // Clipboard sync — bidirectional bridge between KWin selection / consumer
++    void onClipboardChanged();
++    void sendClipboardToConsumer(const QByteArray &text);
++    void sendClipboardToKWin(const QByteArray &text);
++
++    // Inject UTF-8 text from the consumer's IME into the focused KWin client.
++    void sendTextInputToKWin(const QByteArray &text);
++
++    static void fallbackTrampoline(void *data);
++
++    QString m_socketPath;
++    display_ctx *m_display = nullptr;
++
++    std::unique_ptr<RenderDevice> m_renderDevice;
++    QVector<AnlandOutput *> m_outputs;
++    std::unique_ptr<AnlandInputDevice> m_inputDevice;
++
++    QSocketNotifier *m_inputNotifier = nullptr;
++    QSocketNotifier *m_bufReadyNotifier = nullptr;
++    QTimer *m_reconnectTimer = nullptr;
++
++    bool m_consumerReady = false;
++    bool m_inFallback = false;
++
++    // Last known clipboard text — used to de-duplicate (KWin changed -> we sent ->
++    // consumer sets the same text on Android -> consumer sends back to KWin).
++    // QByteArray is trivially sent over the data channel as UTF-8.
++    QByteArray m_clipboardText;
++};
++
++} // namespace KWin
+diff --git a/src/backends/anland/anland_camera.c b/src/backends/anland/anland_camera.c
+new file mode 100644
+index 0000000000..b29cfb6fb6
+--- /dev/null
++++ b/src/backends/anland/anland_camera.c
+@@ -0,0 +1,856 @@
++#define _GNU_SOURCE
++#include "anland_camera.h"
++#include "protocol.h"
++
++#include <errno.h>
++#include <poll.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <sys/mman.h>
++
++#include <pipewire/pipewire.h>
++#include <spa/param/video/format-utils.h>
++#include <spa/param/buffers.h>
++#include <spa/pod/builder.h>
++#include <spa/utils/hook.h>
++
++/*
++ * Control-channel protocol + stream/shm protocol. MUST stay in sync with the
++ * consumer's camera_service.h.
++ */
++struct camera_ctrl_msg {
++    uint8_t  type;
++    uint8_t  reserved;
++    uint16_t len;
++    uint8_t  payload[];
++} __attribute__((packed));
++
++#define CAMERA_CTRL_GET_INFO     0x01
++#define CAMERA_CTRL_START_RECORD 0x02   /* payload: id(1B) w(2B,LE) h(2B,LE) */
++#define CAMERA_CTRL_STOP_RECORD  0x03   /* payload: id(1B) */
++#define CAMERA_CTRL_INFO_REPLY   0x81
++
++/* stream_fd control protocol (SEQPACKET). Frame pixels travel through shared memory;
++ * this only carries the shm hand-off and the READY/DONE pacing. */
++#define CAMERA_SLOTS 2
++struct cam_stream_msg {
++    uint8_t  type;
++    uint8_t  slot;
++    uint16_t fmt;   /* READY: CAM_FMT_*; else 0 */
++    uint32_t a;     /* SHM_OFFER: slot_bytes; READY: width  */
++    uint32_t b;     /* READY: height                        */
++} __attribute__((packed));
++
++#define CAM_STREAM_GET_SHM   1
++#define CAM_STREAM_SHM_OFFER 2
++#define CAM_STREAM_READY     3
++#define CAM_STREAM_DONE      4
++
++/* Pixel layout in a slot (matches consumer camera_service.h). All are w*h*3/2 bytes,
++ * single block, Y-stride = w, so only the announced SPA format differs. */
++#define CAM_FMT_I420 0
++#define CAM_FMT_NV12 1
++#define CAM_FMT_NV21 2
++
++/* Default resolution we advertise + request before anything is negotiated. The node
++ * format then FOLLOWS whatever the consumer actually delivers (every READY carries the
++ * real w/h): if the device's CameraX picks a different size, the first frame triggers a
++ * re-negotiation so the node always matches the real frames -- no garbage, no truncation. */
++#define CAM_DEF_W   1280
++#define CAM_DEF_H   720
++#define CAM_FPS     30
++
++#define MAX_CAMERAS 8
++#define RECONNECT_SECS 1
++
++struct cam {
++    struct anland_camera *owner;
++    int                   index;        /* camera id, for ctrl messages */
++
++    /* Persistent virtual webcam node -- created when a camera first appears, kept
++     * alive across consumer disconnects (blank frames keep flowing), destroyed only
++     * when the camera count shrinks or the engine stops. */
++    struct pw_stream     *node;
++    struct spa_hook       listener;
++    bool                  streaming;    /* an app is consuming this node */
++    bool                  recording;    /* we've told the consumer to START on ctrl */
++    bool                  process_seen; /* one-shot debug: on_process was called */
++
++    /* Current negotiated node format. The node always advertises exactly this, and we
++     * re-negotiate it to match the resolution + pixel layout the consumer actually sends. */
++    uint32_t              fmt_w, fmt_h;
++    int                   fmt_code;   /* CAM_FMT_* currently announced */
++
++    /* Hot-swapped per (re)connect. -1 while detached -> the node emits blank frames. */
++    int                   stream_fd;
++    struct spa_source    *io;
++
++    /* Per-camera shared-memory double buffer, offered by the consumer over stream_fd.
++     * On READY we copy the named slot out into our own `frame` (so the consumer can
++     * reuse the slot immediately) and DONE it; on_process emits `frame` at app pace. */
++    int                   shm_fd;       /* owned dup of the consumer's ashmem, -1 none */
++    uint8_t              *shm;          /* mmap (PROT_READ), CAMERA_SLOTS*slot_bytes    */
++    size_t                shm_bytes;
++    size_t                slot_bytes;
++    bool                  shm_requested;
++
++    /* Producer-owned copy of the latest frame (loop thread only). */
++    uint8_t              *frame;
++    size_t                frame_cap;
++    size_t                frame_size;
++    bool                  have_frame;
++};
++
++struct anland_camera {
++    struct pw_thread_loop *loop;
++    struct pw_context     *context;
++    struct pw_core        *core;
++    struct spa_hook        core_listener;
++    struct spa_source     *reconnect_timer;
++    bool                   pw_connected;
++
++    int                    ctrl_fd;     /* owned; shared control socket, -1 when none */
++    int                    num_cameras; /* number of live nodes */
++    struct cam             cams[MAX_CAMERAS];
++};
++
++static struct anland_camera *g_cam = NULL;
++
++static int  build_pw(struct anland_camera *c);
++static void teardown_pw(struct anland_camera *c);
++static void create_nodes(struct anland_camera *c);
++static void destroy_nodes(struct anland_camera *c);
++static void attach_fd(struct cam *cam, int fd);
++static void detach_fd(struct cam *cam);
++static const struct spa_pod *build_video_format(struct spa_pod_builder *b,
++                                                uint32_t w, uint32_t h, int fmt_code);
++
++/* ---- control channel ---- */
++
++static void send_ctrl(struct anland_camera *c, uint8_t type,
++                      const uint8_t *payload, uint16_t len)
++{
++    if (c->ctrl_fd < 0)
++        return;
++    uint8_t buf[sizeof(struct camera_ctrl_msg) + 8];
++    if (len > sizeof(buf) - sizeof(struct camera_ctrl_msg))
++        return;
++    struct camera_ctrl_msg *h = (struct camera_ctrl_msg *)buf;
++    h->type = type;
++    h->reserved = 0;
++    h->len = len;
++    if (len)
++        memcpy(buf + sizeof(*h), payload, len);
++    send(c->ctrl_fd, buf, sizeof(*h) + len, MSG_NOSIGNAL | MSG_DONTWAIT);
++}
++
++/* Send a fixed stream-control message (GET_SHM / DONE) on a camera's stream socket. */
++static void send_stream(struct cam *cam, uint8_t type, uint8_t slot)
++{
++    if (cam->stream_fd < 0)
++        return;
++    struct cam_stream_msg m = { .type = type, .slot = slot };
++    send(cam->stream_fd, &m, sizeof(m), MSG_NOSIGNAL | MSG_DONTWAIT);
++}
++
++/* Ask the consumer to hand over the shm fd (once per (re)attach, while streaming). */
++static void request_shm(struct cam *cam)
++{
++    if (!cam->streaming || cam->stream_fd < 0 || cam->shm || cam->shm_requested)
++        return;
++    cam->shm_requested = true;
++    send_stream(cam, CAM_STREAM_GET_SHM, 0);
++}
++
++/* Reconcile the "should the consumer be recording?" state with what we've told it.
++ * Recording is wanted when an app is consuming the node AND we have a live control
++ * socket + stream fd. Requests the consumer at the node's current format. */
++static void update_recording(struct cam *cam)
++{
++    const bool want = cam->streaming && cam->stream_fd >= 0 && cam->owner->ctrl_fd >= 0;
++    if (want == cam->recording)
++        return;
++    if (want) {
++        uint8_t p[5];
++        uint16_t w = (uint16_t)cam->fmt_w, h = (uint16_t)cam->fmt_h;
++        p[0] = (uint8_t)cam->index;
++        memcpy(p + 1, &w, sizeof(w));
++        memcpy(p + 3, &h, sizeof(h));
++        send_ctrl(cam->owner, CAMERA_CTRL_START_RECORD, p, sizeof(p));
++        fprintf(stderr, "anland-camera: START_RECORD cam=%d %ux%u\n",
++                cam->index, cam->fmt_w, cam->fmt_h);
++        request_shm(cam);   /* pull the shm fd so frames can flow */
++    } else if (cam->owner->ctrl_fd >= 0) {
++        uint8_t id = (uint8_t)cam->index;
++        send_ctrl(cam->owner, CAMERA_CTRL_STOP_RECORD, &id, 1);
++        fprintf(stderr, "anland-camera: STOP_RECORD cam=%d\n", cam->index);
++    }
++    cam->recording = want;
++}
++
++/* ---- frame emission ---- */
++
++/* The graph calls this whenever the consuming app needs a frame. Emit the latest
++ * received frame, or neutral gray while detached / before the first frame arrives, so
++ * a consuming app always gets a feed. Runs on the loop thread, same as the stream-
++ * socket reader, so cam->frame needs no lock. */
++static void on_process(void *data)
++{
++    struct cam *cam = data;
++    if (!cam->node)
++        return;
++
++    struct pw_buffer *pwb = pw_stream_dequeue_buffer(cam->node);
++    if (!cam->process_seen) {
++        fprintf(stderr, "anland-camera: cam=%d on_process called, buffer=%s\n",
++                cam->index, pwb ? "ok" : "NULL(out of buffers)");
++        cam->process_seen = true;
++    }
++    if (!pwb)
++        return;
++    struct spa_data *d = &pwb->buffer->datas[0];
++    if (d->data) {
++        const bool live = cam->have_frame && cam->stream_fd >= 0;
++        uint32_t fmt_bytes = cam->fmt_w * cam->fmt_h * 3 / 2;
++        uint32_t avail = live ? (uint32_t)cam->frame_size : fmt_bytes;
++        uint32_t copy = avail < d->maxsize ? avail : d->maxsize;
++        if (live)
++            memcpy(d->data, cam->frame, copy);
++        else
++            memset(d->data, 128, copy);   /* neutral gray: valid I420 at any size */
++        d->chunk->offset = 0;
++        d->chunk->stride = cam->fmt_w;   /* I420 Y-plane stride */
++        d->chunk->size = copy;
++    }
++    pw_stream_queue_buffer(cam->node, pwb);
++}
++
++/* Re-announce the node's format to match what the consumer is actually sending (size
++ * AND pixel layout), so the advertised caps always equal the real frames. The app
++ * renegotiates and on_param_changed resizes the buffer pool. fmt_* are updated
++ * optimistically so this doesn't re-fire on every subsequent frame. */
++static void renegotiate_format(struct cam *cam, uint32_t w, uint32_t h, int fmt_code)
++{
++    if (!cam->node || w == 0 || h == 0)
++        return;
++    fprintf(stderr, "anland-camera: cam=%d renegotiate %ux%u/fmt%d -> %ux%u/fmt%d\n",
++            cam->index, cam->fmt_w, cam->fmt_h, cam->fmt_code, w, h, fmt_code);
++    cam->fmt_w = w;
++    cam->fmt_h = h;
++    cam->fmt_code = fmt_code;
++    uint8_t buffer[1024];
++    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
++    const struct spa_pod *params[1] = { build_video_format(&b, w, h, fmt_code) };
++    pw_stream_update_params(cam->node, params, 1);
++}
++
++/* ---- stream socket: shm hand-off + READY/DONE pacing ---- */
++
++static void unmap_shm(struct cam *cam)
++{
++    if (cam->shm) {
++        munmap(cam->shm, cam->shm_bytes);
++        cam->shm = NULL;
++    }
++    if (cam->shm_fd >= 0) {
++        close(cam->shm_fd);
++        cam->shm_fd = -1;
++    }
++    cam->shm_bytes = cam->slot_bytes = 0;
++    cam->shm_requested = false;
++}
++
++static void handle_stream_msg(struct cam *cam, const struct cam_stream_msg *m, int rfd)
++{
++    switch (m->type) {
++    case CAM_STREAM_SHM_OFFER: {
++        if (rfd < 0)
++            return;
++        size_t slot_bytes = m->a;
++        size_t total = (size_t)CAMERA_SLOTS * slot_bytes;
++        if (cam->shm)
++            munmap(cam->shm, cam->shm_bytes);
++        if (cam->shm_fd >= 0)
++            close(cam->shm_fd);
++        cam->shm_fd = rfd;
++        cam->slot_bytes = slot_bytes;
++        cam->shm_bytes = total;
++        cam->shm = mmap(NULL, total, PROT_READ, MAP_SHARED, rfd, 0);
++        if (cam->shm == MAP_FAILED) {
++            cam->shm = NULL;
++            close(rfd);
++            cam->shm_fd = -1;
++            cam->shm_bytes = cam->slot_bytes = 0;
++            return;
++        }
++        fprintf(stderr, "anland-camera: cam=%d shm mapped %zu B/slot\n",
++                cam->index, slot_bytes);
++        break;
++    }
++    case CAM_STREAM_READY: {
++        if (rfd >= 0)
++            close(rfd);   /* READY carries no fd */
++        uint8_t slot = m->slot;
++        uint32_t w = m->a, h = m->b;
++        int fmt = m->fmt;
++        if (cam->shm && slot < CAMERA_SLOTS) {
++            size_t bytes = (size_t)w * h * 3 / 2;
++            if (bytes > cam->slot_bytes)
++                bytes = cam->slot_bytes;
++            if (cam->frame_cap < bytes) {
++                uint8_t *nb = realloc(cam->frame, bytes);
++                if (nb) {
++                    cam->frame = nb;
++                    cam->frame_cap = bytes;
++                }
++            }
++            if (cam->frame_cap >= bytes && bytes > 0) {
++                /* Copy out of the slot promptly so the consumer can reuse it. */
++                memcpy(cam->frame, cam->shm + (size_t)slot * cam->slot_bytes, bytes);
++                cam->frame_size = bytes;
++                if (!cam->have_frame)
++                    fprintf(stderr, "anland-camera: cam=%d first frame %ux%u\n",
++                            cam->index, w, h);
++                cam->have_frame = true;
++            }
++        }
++        /* Release the slot (even if we couldn't read, so the consumer never wedges). */
++        send_stream(cam, CAM_STREAM_DONE, slot);
++        if (w && h && (w != cam->fmt_w || h != cam->fmt_h || fmt != cam->fmt_code))
++            renegotiate_format(cam, w, h, fmt);
++        break;
++    }
++    default:
++        if (rfd >= 0)
++            close(rfd);
++        break;
++    }
++}
++
++static void on_stream_readable(void *data, int fd, uint32_t mask)
++{
++    struct cam *cam = data;
++    if (mask & (SPA_IO_ERR | SPA_IO_HUP))
++        return;
++    if (!(mask & SPA_IO_IN))
++        return;
++
++    for (;;) {
++        struct cam_stream_msg m;
++        int rfd = -1;
++        struct iovec iov = { .iov_base = &m, .iov_len = sizeof(m) };
++        union {
++            char buf[CMSG_SPACE(sizeof(int))];
++            struct cmsghdr align;
++        } cmsg;
++        struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1,
++                              .msg_control = cmsg.buf, .msg_controllen = sizeof(cmsg.buf) };
++        ssize_t n = recvmsg(fd, &msg, MSG_DONTWAIT);
++        if (n <= 0)
++            break;
++        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
++        if (c && c->cmsg_type == SCM_RIGHTS)
++            memcpy(&rfd, CMSG_DATA(c), sizeof(int));
++        if (n >= (ssize_t)sizeof(m))
++            handle_stream_msg(cam, &m, rfd);
++        else if (rfd >= 0)
++            close(rfd);
++    }
++}
++
++/* Point a camera at a fresh stream socket (or -1 to detach). Drops the old shm mapping
++ * (the new connection re-offers it) so a stale region never bleeds into the new one. */
++static void attach_fd(struct cam *cam, int fd)
++{
++    struct pw_loop *loop = pw_thread_loop_get_loop(cam->owner->loop);
++    if (cam->io) {
++        pw_loop_destroy_source(loop, cam->io);
++        cam->io = NULL;
++    }
++    if (cam->stream_fd >= 0)
++        close(cam->stream_fd);
++    cam->stream_fd = fd;
++    unmap_shm(cam);                   /* re-requested on the new connection */
++    cam->have_frame = false;          /* show blank until a fresh frame arrives */
++    if (fd >= 0)
++        cam->io = pw_loop_add_io(loop, fd, SPA_IO_IN, false, on_stream_readable, cam);
++    update_recording(cam);            /* START + GET_SHM if an app is consuming */
++    request_shm(cam);                 /* also (re)request if already streaming */
++}
++
++static void detach_fd(struct cam *cam)
++{
++    attach_fd(cam, -1);
++}
++
++/* ---- Video/Source node ---- */
++
++static uint32_t spa_video_fmt(int code)
++{
++    switch (code) {
++    case CAM_FMT_NV12: return SPA_VIDEO_FORMAT_NV12;
++    case CAM_FMT_NV21: return SPA_VIDEO_FORMAT_NV21;
++    default:           return SPA_VIDEO_FORMAT_I420;
++    }
++}
++
++static const struct spa_pod *build_video_format(struct spa_pod_builder *b,
++                                                uint32_t w, uint32_t h, int fmt_code)
++{
++    struct spa_video_info_raw info;
++    spa_zero(info);
++    info.format = spa_video_fmt(fmt_code);
++    info.size = SPA_RECTANGLE(w, h);
++    info.framerate = SPA_FRACTION(CAM_FPS, 1);
++    return spa_format_video_raw_build(b, SPA_PARAM_EnumFormat, &info);
++}
++
++static void on_stream_state_changed(void *data, enum pw_stream_state old,
++                                    enum pw_stream_state state, const char *error)
++{
++    struct cam *cam = data;
++    (void)error;
++    fprintf(stderr, "anland-camera: cam=%d state %s -> %s\n", cam->index,
++            pw_stream_state_as_string(old), pw_stream_state_as_string(state));
++    const bool streaming = (state == PW_STREAM_STATE_STREAMING);
++    if (streaming == cam->streaming)
++        return;
++    cam->streaming = streaming;
++    update_recording(cam);
++}
++
++/* The format was negotiated: parse it and declare a buffer pool of the matching size.
++ * Without this PipeWire never allocates correctly-sized buffers and
++ * pw_stream_dequeue_buffer() returns NULL forever, so on_process can never emit. */
++static void on_param_changed(void *data, uint32_t id, const struct spa_pod *param)
++{
++    struct cam *cam = data;
++    if (!param || id != SPA_PARAM_Format)
++        return;
++
++    uint32_t mtype, msubtype;
++    if (spa_format_parse(param, &mtype, &msubtype) < 0 ||
++        mtype != SPA_MEDIA_TYPE_video || msubtype != SPA_MEDIA_SUBTYPE_raw)
++        return;
++
++    struct spa_video_info_raw raw;
++    spa_zero(raw);
++    if (spa_format_video_raw_parse(param, &raw) < 0)
++        return;
++    if (raw.size.width)
++        cam->fmt_w = raw.size.width;
++    if (raw.size.height)
++        cam->fmt_h = raw.size.height;
++
++    uint32_t frame_bytes = cam->fmt_w * cam->fmt_h * 3 / 2;
++    fprintf(stderr, "anland-camera: cam=%d format negotiated %ux%u (%ub), declaring buffers\n",
++            cam->index, cam->fmt_w, cam->fmt_h, frame_bytes);
++
++    uint8_t buffer[512];
++    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
++    const struct spa_pod *params[1];
++    params[0] = spa_pod_builder_add_object(&b,
++        SPA_TYPE_OBJECT_ParamBuffers, SPA_PARAM_Buffers,
++        SPA_PARAM_BUFFERS_buffers,  SPA_POD_CHOICE_RANGE_Int(4, 2, 8),
++        SPA_PARAM_BUFFERS_blocks,   SPA_POD_Int(1),
++        SPA_PARAM_BUFFERS_size,     SPA_POD_Int((int)frame_bytes),
++        SPA_PARAM_BUFFERS_stride,   SPA_POD_Int((int)cam->fmt_w),
++        SPA_PARAM_BUFFERS_dataType, SPA_POD_CHOICE_FLAGS_Int(
++            (1 << SPA_DATA_MemPtr) | (1 << SPA_DATA_MemFd)));
++    pw_stream_update_params(cam->node, params, 1);
++}
++
++static const struct pw_stream_events stream_events = {
++    PW_VERSION_STREAM_EVENTS,
++    .state_changed = on_stream_state_changed,
++    .param_changed = on_param_changed,
++    .process = on_process,
++};
++
++static int connect_node(struct cam *cam)
++{
++    char name[32], desc[48];
++    snprintf(name, sizeof(name), "anland-camera-%d", cam->index);
++    snprintf(desc, sizeof(desc), "Anland remote camera %d", cam->index);
++
++    cam->node = pw_stream_new(cam->owner->core, name,
++        pw_properties_new(
++            PW_KEY_MEDIA_TYPE, "Video",
++            PW_KEY_MEDIA_CATEGORY, "Capture",
++            PW_KEY_MEDIA_CLASS, "Video/Source",
++            PW_KEY_MEDIA_ROLE, "Camera",
++            PW_KEY_NODE_NAME, name,
++            PW_KEY_NODE_DESCRIPTION, desc,
++            NULL));
++    if (!cam->node)
++        return -1;
++    pw_stream_add_listener(cam->node, &cam->listener, &stream_events, cam);
++
++    uint8_t buffer[1024];
++    struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
++    const struct spa_pod *params[1] = {
++        build_video_format(&b, cam->fmt_w, cam->fmt_h, cam->fmt_code) };
++
++    /* No DRIVER flag: the consuming app (graph) drives, so PipeWire calls on_process
++     * on demand. No RT_PROCESS either, so on_process runs on the same loop thread as
++     * the stream-socket reader and shares cam->frame without a lock. */
++    return pw_stream_connect(cam->node, PW_DIRECTION_OUTPUT, PW_ID_ANY,
++                             PW_STREAM_FLAG_MAP_BUFFERS,
++                             params, 1);
++}
++
++/* Create the node for one camera slot (no fd attached yet). PipeWire drives its
++ * .process whenever an app consumes it. */
++static int create_node(struct cam *cam)
++{
++    if (cam->node)
++        return 0;
++    cam->streaming = false;
++    cam->recording = false;
++    cam->process_seen = false;
++    if (cam->fmt_w == 0 || cam->fmt_h == 0) {
++        cam->fmt_w = CAM_DEF_W;
++        cam->fmt_h = CAM_DEF_H;
++    }
++    /* The consumer always delivers NV21, so advertise it from the start -- no live
++     * format switch (which crashes downstream gst). Only resolution ever renegotiates. */
++    cam->fmt_code = CAM_FMT_NV21;
++    return connect_node(cam);
++}
++
++/* (Re)create nodes for the current camera count, e.g. after a PipeWire reconnect.
++ * The stream fds in cam->stream_fd are preserved, so readers are re-armed. */
++static void create_nodes(struct anland_camera *c)
++{
++    if (!c->pw_connected || !c->core)
++        return;
++    struct pw_loop *loop = pw_thread_loop_get_loop(c->loop);
++    for (int i = 0; i < c->num_cameras; i++) {
++        struct cam *cam = &c->cams[i];
++        if (cam->node)
++            continue;
++        create_node(cam);
++        if (cam->stream_fd >= 0 && !cam->io)
++            cam->io = pw_loop_add_io(loop, cam->stream_fd, SPA_IO_IN, false,
++                                     on_stream_readable, cam);
++    }
++}
++
++/* Destroy one camera's node and reader. Keeps stream_fd (caller decides). */
++static void destroy_node(struct cam *cam)
++{
++    struct pw_loop *loop = cam->owner && cam->owner->loop
++                               ? pw_thread_loop_get_loop(cam->owner->loop) : NULL;
++    if (cam->node) {
++        spa_hook_remove(&cam->listener);
++        pw_stream_destroy(cam->node);
++        cam->node = NULL;
++    }
++    if (cam->io && loop) {
++        pw_loop_destroy_source(loop, cam->io);
++        cam->io = NULL;
++    }
++    cam->streaming = false;
++    cam->recording = false;
++}
++
++static void destroy_nodes(struct anland_camera *c)
++{
++    for (int i = 0; i < MAX_CAMERAS; i++)
++        destroy_node(&c->cams[i]);
++}
++
++/* ---- PipeWire connection lifecycle (mirrors the audio engine) ---- */
++
++static void arm_reconnect(struct anland_camera *c)
++{
++    struct timespec val = { .tv_sec = RECONNECT_SECS, .tv_nsec = 0 };
++    pw_loop_update_timer(pw_thread_loop_get_loop(c->loop), c->reconnect_timer,
++                         &val, NULL, false);
++}
++
++static void on_core_error(void *data, uint32_t id, int seq, int res, const char *message)
++{
++    struct anland_camera *c = data;
++    (void)seq;
++    (void)message;
++    if (id == PW_ID_CORE && res == -EPIPE) {
++        c->pw_connected = false;
++        arm_reconnect(c);
++    }
++}
++
++static const struct pw_core_events core_events = {
++    PW_VERSION_CORE_EVENTS,
++    .error = on_core_error,
++};
++
++static int build_pw(struct anland_camera *c)
++{
++    c->core = pw_context_connect(c->context, NULL, 0);
++    if (!c->core)
++        return -1;
++    pw_core_add_listener(c->core, &c->core_listener, &core_events, c);
++    return 0;
++}
++
++static void teardown_pw(struct anland_camera *c)
++{
++    destroy_nodes(c);
++    if (c->core) {
++        spa_hook_remove(&c->core_listener);
++        pw_core_disconnect(c->core);
++        c->core = NULL;
++    }
++}
++
++static void on_reconnect_timer(void *data, uint64_t expirations)
++{
++    struct anland_camera *c = data;
++    (void)expirations;
++    if (c->pw_connected)
++        return;
++
++    teardown_pw(c);
++    if (build_pw(c) == 0) {
++        c->pw_connected = true;
++        create_nodes(c);   /* rebuild nodes from the still-valid stream fds */
++    } else {
++        teardown_pw(c);
++        arm_reconnect(c);
++    }
++}
++
++/* Round-trip GET_INFO over the control socket to learn each camera's max sensor
++ * resolution, used to seed the initial node format. Blocking with a short timeout;
++ * called off the PipeWire loop thread (so it never stalls the RT loop). Fills
++ * w[i]/h[i], left at 0 when unknown. */
++static void query_max_res(int ctrl_fd, uint32_t *w, uint32_t *h, int n)
++{
++    struct camera_ctrl_msg req = { .type = CAMERA_CTRL_GET_INFO, .reserved = 0, .len = 0 };
++    if (send(ctrl_fd, &req, sizeof(req), MSG_NOSIGNAL) < 0)
++        return;
++
++    struct pollfd pfd = { .fd = ctrl_fd, .events = POLLIN };
++    if (poll(&pfd, 1, 300) <= 0)
++        return;
++
++    uint8_t buf[sizeof(struct camera_ctrl_msg) + 1 + MAX_CAMERAS * 4];
++    ssize_t r = recv(ctrl_fd, buf, sizeof(buf), 0);
++    if (r < (ssize_t)sizeof(struct camera_ctrl_msg))
++        return;
++    struct camera_ctrl_msg *hdr = (struct camera_ctrl_msg *)buf;
++    if (hdr->type != CAMERA_CTRL_INFO_REPLY)
++        return;
++
++    uint8_t *pl = buf + sizeof(struct camera_ctrl_msg);
++    size_t avail = (size_t)r - sizeof(struct camera_ctrl_msg);
++    if (avail < 1)
++        return;
++    int num = pl[0];
++    size_t off = 1;
++    for (int i = 0; i < num && i < n; i++) {
++        if (off + 4 > avail)
++            break;
++        uint16_t w16, h16;
++        memcpy(&w16, pl + off, sizeof(w16));
++        memcpy(&h16, pl + off + 2, sizeof(h16));
++        off += 4;
++        w[i] = w16;
++        h[i] = h16;
++    }
++}
++
++/* ---- public API ---- */
++
++void anland_camera_set_resources(int ctrl_fd, const int *stream_fds, int num_cameras)
++{
++    /* Lazily bring the engine up on the first resource delivery: the PipeWire
++     * thread-loop is only started once a consumer actually hands over a camera,
++     * never just because the backend is running. */
++    if (!g_cam && anland_camera_start() < 0) {
++        if (ctrl_fd >= 0)
++            close(ctrl_fd);
++        for (int i = 0; i < num_cameras; i++)
++            if (stream_fds[i] >= 0)
++                close(stream_fds[i]);
++        return;
++    }
++    struct anland_camera *c = g_cam;
++    if (num_cameras > MAX_CAMERAS)
++        num_cameras = MAX_CAMERAS;
++
++    /* Only worth the blocking GET_INFO round-trip when we'll actually create a NEW
++     * node: existing (persistent) nodes keep their negotiated format across reconnects,
++     * so re-querying for them would just waste a round-trip and discard the result. */
++    bool need_query = false;
++    for (int i = 0; i < num_cameras; i++) {
++        if (!c->cams[i].node) {
++            need_query = true;
++            break;
++        }
++    }
++
++    /* Done BEFORE taking the loop lock so the blocking round-trip never stalls the
++     * RT loop. New nodes are then created at the real sensor resolution. */
++    uint32_t qw[MAX_CAMERAS] = {0}, qh[MAX_CAMERAS] = {0};
++    if (ctrl_fd >= 0 && need_query)
++        query_max_res(ctrl_fd, qw, qh, num_cameras);
++
++    pw_thread_loop_lock(c->loop);
++
++    /* Swap in the new control socket. */
++    if (c->ctrl_fd >= 0)
++        close(c->ctrl_fd);
++    c->ctrl_fd = ctrl_fd;
++
++    /* Pop excess cameras if the new connection exposes fewer than before. */
++    for (int i = num_cameras; i < c->num_cameras; i++) {
++        destroy_node(&c->cams[i]);
++        detach_fd(&c->cams[i]);   /* closes the now-stale stream fd */
++    }
++
++    /* Create any newly-appeared cameras, then (re)attach every live one's stream fd.
++     * Existing nodes are kept (apply-in-place, like the audio engine hot-swaps its
++     * socket) so consuming apps never see the webcam disappear across a reconnect. */
++    c->num_cameras = num_cameras;
++    for (int i = 0; i < num_cameras; i++) {
++        struct cam *cam = &c->cams[i];
++        cam->owner = c;
++        cam->index = i;
++        /* Seed a NEW node's format from the reported sensor max. For an existing node we
++         * must not touch fmt_w/h -- it would desync on_process's stride from the node's
++         * live negotiated format. (No upper cap: we use the camera's real max; only a
++         * missing/zero reply leaves create_node's 720p default in place.) */
++        if (!cam->node && qw[i] >= 64 && qh[i] >= 64) {
++            cam->fmt_w = qw[i];
++            cam->fmt_h = qh[i];
++        }
++        create_node(cam);
++        attach_fd(cam, stream_fds[i]);
++    }
++
++    pw_thread_loop_unlock(c->loop);
++}
++
++void anland_camera_clear(void)
++{
++    struct anland_camera *c = g_cam;
++    if (!c)
++        return;
++
++    pw_thread_loop_lock(c->loop);
++    /* Consumer is gone: drop the control socket and detach every camera's stream fd.
++     * The nodes stay alive and keep emitting blank frames, so PipeWire and any
++     * capturing app never see the cameras disappear -- the audio engine's detach
++     * behaviour. */
++    if (c->ctrl_fd >= 0) {
++        close(c->ctrl_fd);
++        c->ctrl_fd = -1;
++    }
++    for (int i = 0; i < c->num_cameras; i++) {
++        c->cams[i].recording = false;   /* the consumer that we told to record is gone */
++        detach_fd(&c->cams[i]);
++    }
++    pw_thread_loop_unlock(c->loop);
++}
++
++int anland_camera_start(void)
++{
++    if (g_cam)
++        return 0;
++
++    pw_init(NULL, NULL);
++
++    struct anland_camera *c = calloc(1, sizeof(*c));
++    if (!c)
++        return -1;
++    c->ctrl_fd = -1;
++    for (int i = 0; i < MAX_CAMERAS; i++) {
++        c->cams[i].stream_fd = -1;
++        c->cams[i].shm_fd = -1;
++    }
++
++    c->loop = pw_thread_loop_new("anland-camera", NULL);
++    if (!c->loop)
++        goto fail;
++
++    c->context = pw_context_new(pw_thread_loop_get_loop(c->loop), NULL, 0);
++    if (!c->context)
++        goto fail;
++
++    c->reconnect_timer = pw_loop_add_timer(pw_thread_loop_get_loop(c->loop),
++                                           on_reconnect_timer, c);
++    if (!c->reconnect_timer)
++        goto fail;
++
++    if (pw_thread_loop_start(c->loop) < 0)
++        goto fail;
++
++    pw_thread_loop_lock(c->loop);
++    if (build_pw(c) == 0) {
++        c->pw_connected = true;
++    } else {
++        teardown_pw(c);
++        arm_reconnect(c);
++    }
++    pw_thread_loop_unlock(c->loop);
++
++    g_cam = c;
++    return 0;
++
++fail:
++    if (c->loop)
++        pw_thread_loop_destroy(c->loop);
++    if (c->context)
++        pw_context_destroy(c->context);
++    free(c);
++    pw_deinit();
++    return -1;
++}
++
++void anland_camera_stop(void)
++{
++    struct anland_camera *c = g_cam;
++    if (!c)
++        return;
++    g_cam = NULL;
++
++    if (c->loop)
++        pw_thread_loop_lock(c->loop);
++    teardown_pw(c);
++    for (int i = 0; i < MAX_CAMERAS; i++) {
++        struct cam *cam = &c->cams[i];
++        if (cam->stream_fd >= 0) {
++            close(cam->stream_fd);
++            cam->stream_fd = -1;
++        }
++        unmap_shm(cam);
++        free(cam->frame);
++        cam->frame = NULL;
++    }
++    if (c->ctrl_fd >= 0) {
++        close(c->ctrl_fd);
++        c->ctrl_fd = -1;
++    }
++    if (c->reconnect_timer)
++        pw_loop_destroy_source(pw_thread_loop_get_loop(c->loop), c->reconnect_timer);
++    if (c->loop)
++        pw_thread_loop_unlock(c->loop);
++
++    if (c->loop)
++        pw_thread_loop_stop(c->loop);
++    if (c->context)
++        pw_context_destroy(c->context);
++    if (c->loop)
++        pw_thread_loop_destroy(c->loop);
++    free(c);
++    pw_deinit();
++}
+diff --git a/src/backends/anland/anland_camera.h b/src/backends/anland/anland_camera.h
+new file mode 100644
+index 0000000000..d16aafc775
+--- /dev/null
++++ b/src/backends/anland/anland_camera.h
+@@ -0,0 +1,54 @@
++#ifndef ANLAND_CAMERA_H
++#define ANLAND_CAMERA_H
++
++/*
++ * Producer-side camera engine.
++ *
++ * Owns a persistent PipeWire thread-loop for the whole KWin session (like the audio
++ * engine), but unlike audio the camera *nodes* are dynamic: they exist only while a
++ * consumer is connected and has handed over its camera resources.
++ *
++ * Lifecycle, driven by the backend state machine:
++ *   - anland_camera_start()                      once, at backend init
++ *   - on leaving fallback: the backend requests SERVICE_TYPE_CAMERA; when the
++ *     consumer replies with { ctrl_fd, stream_fd_0..N-1 } the backend calls
++ *     anland_camera_set_resources(), which creates one virtual Video/Source node per
++ *     camera so Linux apps see them as webcams.
++ *   - on entering fallback: anland_camera_clear() stops any recording, destroys the
++ *     nodes and closes the fds.
++ *   - anland_camera_stop()                       once, at backend teardown
++ *
++ * The camera only physically turns on when an app actually consumes a node: the node's
++ * stream going live sends CAMERA_CTRL_START_RECORD to the consumer over ctrl_fd (and
++ * STOP_RECORD when the last consumer goes away). Frames (I420) arrive on each stream_fd
++ * and are emitted by that camera's Video/Source.
++ *
++ * All fds passed to set_resources are OWNED by the engine (SCM_RIGHTS dups) and closed
++ * in clear()/stop().
++ */
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++/* Create the thread-loop and connect to PipeWire. Returns 0 on success, -1 on
++ * failure. Idempotent: a second call while already started is a no-op returning 0. */
++int  anland_camera_start(void);
++
++/* Stop and destroy the engine (also clears any active resources). Safe when stopped. */
++void anland_camera_stop(void);
++
++/* Adopt the consumer's camera resources and build one Video/Source per camera.
++ * fds layout matches the consumer's camera_allocate_resource(): fds[0] is the shared
++ * control socket, fds[1..n_streams] are the per-camera stream sockets. Replaces any
++ * previously-set resources. Takes ownership of all fds. */
++void anland_camera_set_resources(int ctrl_fd, const int *stream_fds, int num_cameras);
++
++/* Tear down the nodes, stop recording, and close all resource fds. Idempotent. */
++void anland_camera_clear(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* ANLAND_CAMERA_H */
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+new file mode 100644
+index 0000000000..a29fca1649
+--- /dev/null
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -0,0 +1,327 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#include "anland_egl_backend.h"
++#include "anland_backend.h"
++#include "anland_logging.h"
++#include "anland_output.h"
++
++// kwin
++#include "core/graphicsbuffer.h" // DmaBufAttributes
++#include "core/output.h" // OutputTransform
++#include "opengl/egldisplay.h"
++#include "opengl/eglcontext.h"
++#include "opengl/eglnativefence.h"
++#include "opengl/glutils.h"
++#include "utils/filedescriptor.h"
++
++#include <drm_fourcc.h>
++#include <unistd.h>
++
++#ifndef EGL_PLATFORM_SURFACELESS_MESA
++#define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
++#endif
++
++namespace KWin
++{
++
++/*
++ * The daemon's screen_info.format / buf_info.format uses the consumer-side
++ * pixel-format enum (see common/protocol.h). 1 == RGBA_8888 in Android memory
++ * layout, which is ABGR8888 in DRM fourcc terms; everything else is treated as
++ * XRGB8888. Mirrors protocol_format_to_drm() in weston's backend-anland.
++ */
++static uint32_t protocol_format_to_drm(uint32_t fmt)
++{
++    switch (fmt) {
++    case 1:
++        return DRM_FORMAT_ABGR8888;
++    default:
++        return DRM_FORMAT_XRGB8888;
++    }
++}
++
++AnlandEglLayer::AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend)
++    : OutputLayer(output, OutputLayerType::Primary)
++    , m_backend(backend)
++    , m_output(output)
++    , m_display(backend->display())
++{
++    // React to runtime orientation changes (System Settings / kscreen-doctor)
++    // through the output's transformChanged signal instead of polling the transform
++    // in the per-frame render path. Qt drops the connection automatically when this
++    // layer (a QObject via OutputLayer) or the output is destroyed.
++    connect(m_output, &BackendOutput::transformChanged, this, &AnlandEglLayer::onOutputTransformChanged);
++}
++
++AnlandEglLayer::~AnlandEglLayer()
++{
++    // Avoid leaving a dangling pointer in the output when we're destroyed without a
++    // removeOutput() call (e.g. ~AnlandEglBackend clearing m_outputs).
++    if (m_output && m_output->eglLayer() == this) {
++        m_output->setEglLayer(nullptr);
++    }
++    releaseBuffers();
++}
++
++void AnlandEglLayer::releaseBuffers()
++{
++    // Destroying the GL textures/framebuffers needs the context current. Callers
++    // (backend state machine on fallback, ~AnlandEglLayer) may run outside a frame.
++    m_backend->openglContext()->makeCurrent();
++
++    for (int i = 0; i < MAX_BUFS; i++) {
++        m_fbos[i].reset();
++        m_textures[i].reset();
++        m_renderTargets[i].reset();
++        m_accumDamage[i] = Region();
++    }
++    m_damageFlags = 0;
++    m_damageMask = 0;
++    m_bufCount = 0;
++}
++
++bool AnlandEglLayer::importBuffers(int count)
++{
++    m_backend->openglContext()->makeCurrent();
++
++    releaseBuffers();
++
++    // The consumer reads this dmabuf top-down, while GL renders bottom-up, so the
++    // content transform always carries a vertical flip. On top of that we fold in
++    // the output's configured rotation, so the scene is rendered pre-rotated into
++    // the (fixed-size, landscape) dmabuf — that is what lets the very same buffer
++    // drive a portrait / 180° display. KWin's renderer (RenderTarget/RenderViewport)
++    // bakes this single transform into the root projection with no extra copy; it is
++    // the official 6.x replacement for the old GLFramebuffer::setYInverted() flag the
++    // 5.27 patch carried. Combining the output rotation with FlipY mirrors the DRM
++    // backend exactly (drmOutput()->transform().combine(OutputTransform::FlipY)).
++    // The tag is sticky on each texture; after import it is only ever updated
++    // reactively, in onOutputTransformChanged().
++    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
++
++    for (int i = 0; i < count; i++) {
++        const int fd = get_dmabuf_fd_at(m_display, i);
++        buf_info info;
++        if (fd < 0 || get_dmabuf_info_at(m_display, i, &info) < 0) {
++            qCWarning(KWIN_ANLAND) << "failed to get dmabuf info for buffer" << i;
++            releaseBuffers();
++            return false;
++        }
++
++        /* The per-buffer width/height come from the consumer's native resolution
++         * (buf_info, filled by collect_dmabufs). If it differs from the current
++         * OutputMode, resize the output to match — the consumer may have rotated or
++         * switched display modes. All buffers in a set share the same size, so we
++         * only need to check the first buffer. */
++        if (i == 0) {
++            const QSize bufSize(info.width, info.height);
++            if (bufSize != m_output->modeSize() && bufSize.isValid()) {
++                qCInfo(KWIN_ANLAND) << "dmabuf size changed, resizing output to" << bufSize;
++                m_output->resize(bufSize);
++            }
++        }
++        const QSize actual(info.width, info.height);
++
++        DmaBufAttributes attrs;
++        attrs.planeCount = 1;
++        attrs.width = actual.width();
++        attrs.height = actual.height();
++        attrs.format = protocol_format_to_drm(info.format);
++        attrs.modifier = info.modifier;
++        // The producer owns the dmabuf fd; DmaBufAttributes (and the EGLImage we
++        // hand the fd to) must not close it, so dup() into the owning slot.
++        attrs.fd[0] = FileDescriptor(dup(fd));
++        attrs.offset[0] = static_cast<int>(info.offset);
++        attrs.pitch[0] = static_cast<int>(info.stride);
++
++        // EglBackend::importDmaBufAsTexture() builds the EGLImage and wraps it in
++        // a GLTexture in one step (the 5.27-era manual EGLImageKHR +
++        // EGLImageTexture(...) dance is gone in 6.x).
++        std::shared_ptr<GLTexture> texture = m_backend->importDmaBufAsTexture(attrs);
++        if (!texture) {
++            qCWarning(KWIN_ANLAND) << "failed to import dmabuf" << i << "as texture";
++            releaseBuffers();
++            return false;
++        }
++
++        texture->setContentTransform(contentTransform);
++        auto fbo = std::make_unique<GLFramebuffer>(texture.get());
++        if (!fbo->valid()) {
++            qCWarning(KWIN_ANLAND) << "framebuffer for dmabuf" << i << "is not complete";
++            releaseBuffers();
++            return false;
++        }
++
++        qCDebug(KWIN_ANLAND) << "imported buffer" << i << "fd" << fd << actual
++                             << "fmt" << Qt::hex << attrs.format << "mod" << attrs.modifier;
++
++        m_textures[i] = std::move(texture);
++        m_fbos[i] = std::move(fbo);
++        m_renderTargets[i].emplace(m_fbos[i].get());
++        // Freshly imported dmabuf has undefined contents: owe it a full repaint.
++        m_accumDamage[i] = Region::infinite();
++    }
++
++    m_bufCount = count;
++    m_damageMask = (uint8_t)((1 << m_bufCount) - 1);
++    m_damageFlags = m_damageMask;
++    return true;
++}
++
++void AnlandEglLayer::onOutputTransformChanged()
++{
++    const OutputTransform contentTransform = m_output->transform().combine(OutputTransform::FlipY);
++    for (int i = 0; i < m_bufCount; i++) {
++        m_textures[i]->setContentTransform(contentTransform);
++        // The cached RenderTarget captured the old transform; rebuild it so the
++        // renderer picks up the new content transform on the next doBeginFrame.
++        m_renderTargets[i].emplace(m_fbos[i].get());
++        m_accumDamage[i] = Region::infinite();
++    }
++    m_damageFlags = m_damageMask;
++    scheduleRepaint(nullptr);
++}
++
++std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
++{
++    m_backend->openglContext()->makeCurrent();
++
++    m_currentIndex = get_selected_idx(m_display);
++
++    return OutputLayerBeginFrameInfo{
++        .renderTarget = *m_renderTargets[m_currentIndex],
++        .repaint = m_accumDamage[m_currentIndex],
++    };
++}
++
++bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
++{
++    glFlush(); // flush pending rendering commands into the dmabuf.
++    for (int i = 0; i < m_bufCount; i++)
++        m_accumDamage[i] = m_accumDamage[i] + damagedDeviceRegion;
++
++    if (!damagedDeviceRegion.isEmpty())
++        m_damageFlags = m_damageMask;
++
++    m_accumDamage[m_currentIndex] = Region();
++
++    m_damageFlags &= ~(uint8_t)(1 << m_currentIndex);
++    if (m_damageFlags != 0)
++        scheduleRepaint(nullptr);
++
++    // Instead of CPU-blocking on glFinish, create a fence for the just-submitted
++    // GPU work and hand it to the consumer (via the transport). The consumer passes
++    // it to ANativeWindow_queueBuffer, so SurfaceFlinger waits on it GPU-side before
++    // scanout -- letting us submit the buffer before its render completes.
++    EGLNativeFence fence{m_backend->openglContext()->displayObject()};
++    set_render_fence(m_display, fence.takeFileDescriptor().take());
++    return true;
++}
++
++DrmDevice *AnlandEglLayer::scanoutDevice() const
++{
++    return m_backend->drmDevice();
++}
++
++FormatModifierMap AnlandEglLayer::supportedDrmFormats() const
++{
++    return {};
++}
++
++AnlandEglBackend::AnlandEglBackend(AnlandBackend *b)
++    : m_backend(b)
++{
++}
++
++AnlandEglBackend::~AnlandEglBackend()
++{
++    m_outputs.clear();
++    cleanup();
++}
++
++display_ctx *AnlandEglBackend::display() const
++{
++    return m_backend->display();
++}
++
++DrmDevice *AnlandEglBackend::drmDevice() const
++{
++    return m_backend->drmDevice();
++}
++
++bool AnlandEglBackend::initializeEgl()
++{
++    if (!initClientExtensions()) {
++        return false;
++    }
++    Q_ASSERT(m_backend->renderDevice());
++    setRenderDevice(m_backend->renderDevice());
++    return true;
++}
++
++bool AnlandEglBackend::init()
++{
++    if (!initializeEgl()) {
++        qCWarning(KWIN_ANLAND, "Could not initialize egl");
++        return false;
++    }
++    if (!initRenderingContext()) {
++        qCWarning(KWIN_ANLAND, "Could not initialize rendering context");
++        return false;
++    }
++
++    if (checkGLError("Init")) {
++        qCWarning(KWIN_ANLAND, "Error during init of AnlandEglBackend");
++        return false;
++    }
++
++    initWayland();
++
++    const auto outputs = m_backend->outputs();
++    for (BackendOutput *output : outputs) {
++        addOutput(output);
++    }
++
++    connect(m_backend, &AnlandBackend::outputAdded, this, &AnlandEglBackend::addOutput);
++    connect(m_backend, &AnlandBackend::outputRemoved, this, &AnlandEglBackend::removeOutput);
++    return true;
++}
++
++bool AnlandEglBackend::initRenderingContext()
++{
++    return createContext() && openglContext()->makeCurrent();
++}
++
++void AnlandEglBackend::addOutput(BackendOutput *output)
++{
++    openglContext()->makeCurrent();
++    auto *anlandOutput = static_cast<AnlandOutput *>(output);
++    auto layer = std::make_unique<AnlandEglLayer>(anlandOutput, this);
++    // Let AnlandBackend reach this layer through its output (output->eglLayer()).
++    anlandOutput->setEglLayer(layer.get());
++    m_outputs[output] = std::move(layer);
++}
++
++void AnlandEglBackend::removeOutput(BackendOutput *output)
++{
++    openglContext()->makeCurrent();
++    static_cast<AnlandOutput *>(output)->setEglLayer(nullptr);
++    m_outputs.erase(output);
++}
++
++QList<OutputLayer *> AnlandEglBackend::compatibleOutputLayers(BackendOutput *output)
++{
++    auto it = m_outputs.find(output);
++    if (it == m_outputs.end()) {
++        return {};
++    }
++    return {it->second.get()};
++}
++
++} // namespace KWin
++
++#include "moc_anland_egl_backend.cpp"
+diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
+new file mode 100644
+index 0000000000..bc80e1c2c5
+--- /dev/null
++++ b/src/backends/anland/anland_egl_backend.h
+@@ -0,0 +1,101 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++
++    OpenGL/EGL render backend for the anland backend. It renders the KWin scene
++    directly into the dmabuf buffers provided by the display daemon (imported by
++    fd) and tells the daemon to present them. Modeled on VirtualEglBackend, with
++    the render target being one of the daemon's dmabufs instead of an internal
++    FBO. The consumer rotates the buffer index externally (shared memory), so the
++    layer keeps per-buffer accumulated damage (buffer-age equivalent), exactly
++    like weston's backend-anland.
++*/
++#pragma once
++
++#include "core/outputlayer.h"
++#include "core/region.h"
++#include "opengl/eglbackend.h"
++
++#include <array>
++#include <map>
++#include <memory>
++#include <optional>
++
++extern "C" {
++#include "display_producer.h"
++#include "protocol.h"
++}
++
++namespace KWin
++{
++class GLFramebuffer;
++class GLTexture;
++class BackendOutput;
++class DrmDevice;
++class OutputFrame;
++class AnlandBackend;
++class AnlandEglBackend;
++class AnlandOutput;
++
++class AnlandEglLayer : public OutputLayer
++{
++public:
++    AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend);
++    ~AnlandEglLayer() override;
++
++    std::optional<OutputLayerBeginFrameInfo> doBeginFrame() override;
++    bool doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
++    DrmDevice *scanoutDevice() const override;
++    FormatModifierMap supportedDrmFormats() const override;
++    bool importBuffers(int count);
++    void releaseBuffers() override;
++
++private:
++    void onOutputTransformChanged();
++
++    AnlandEglBackend *const m_backend;
++    AnlandOutput *m_output;
++    display_ctx *const m_display;
++
++    int m_bufCount = 0;
++    int m_currentIndex = 0;
++    uint8_t m_damageFlags = 0;
++    uint8_t m_damageMask = 0;
++    std::array<std::shared_ptr<GLTexture>, MAX_BUFS> m_textures;
++    std::array<std::unique_ptr<GLFramebuffer>, MAX_BUFS> m_fbos;
++    std::array<std::optional<RenderTarget>, MAX_BUFS> m_renderTargets;
++    std::array<Region, MAX_BUFS> m_accumDamage;
++};
++
++class AnlandEglBackend : public EglBackend
++{
++    Q_OBJECT
++
++public:
++    AnlandEglBackend(AnlandBackend *b);
++    ~AnlandEglBackend() override;
++
++    bool init() override;
++    QList<OutputLayer *> compatibleOutputLayers(BackendOutput *output) override;
++    DrmDevice *drmDevice() const override;
++
++    AnlandBackend *backend() const
++    {
++        return m_backend;
++    }
++    display_ctx *display() const;
++
++private:
++    bool initializeEgl();
++    bool initRenderingContext();
++
++    void addOutput(BackendOutput *output);
++    void removeOutput(BackendOutput *output);
++
++    AnlandBackend *m_backend;
++    std::map<BackendOutput *, std::unique_ptr<AnlandEglLayer>> m_outputs;
++};
++
++} // namespace KWin
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+new file mode 100644
+index 0000000000..b2bb835f6f
+--- /dev/null
++++ b/src/backends/anland/anland_input.cpp
+@@ -0,0 +1,172 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#include "anland_input.h"
++#include "anland_backend.h"
++
++#include <chrono>
++
++namespace KWin
++{
++
++static std::chrono::microseconds now()
++{
++    return std::chrono::duration_cast<std::chrono::microseconds>(
++        std::chrono::steady_clock::now().time_since_epoch());
++}
++
++AnlandInputDevice::AnlandInputDevice(QObject *parent)
++    : InputDevice(parent)
++{
++}
++
++QString AnlandInputDevice::name() const
++{
++    return QStringLiteral("anland virtual input");
++}
++
++bool AnlandInputDevice::isEnabled() const
++{
++    return m_enabled;
++}
++
++void AnlandInputDevice::setEnabled(bool enabled)
++{
++    m_enabled = enabled;
++}
++
++LEDs AnlandInputDevice::leds() const
++{
++    return LEDs();
++}
++
++void AnlandInputDevice::setLeds(LEDs leds)
++{
++}
++
++bool AnlandInputDevice::isKeyboard() const
++{
++    return true;
++}
++
++bool AnlandInputDevice::isPointer() const
++{
++    return true;
++}
++
++bool AnlandInputDevice::isTouchpad() const
++{
++    return false;
++}
++
++bool AnlandInputDevice::isTouch() const
++{
++    return true;
++}
++
++bool AnlandInputDevice::isTabletTool() const
++{
++    return false;
++}
++
++bool AnlandInputDevice::isTabletPad() const
++{
++    return false;
++}
++
++bool AnlandInputDevice::isTabletModeSwitch() const
++{
++    return false;
++}
++
++bool AnlandInputDevice::isLidSwitch() const
++{
++    return false;
++}
++
++// KWin only delivers pointer events to client apps on a wl_pointer.frame, so every
++// pointer event must be followed by a pointerFrame() (exactly as the libinput
++// backend does). Without it scroll is dropped entirely; cursor motion and focus
++// still appear to work only because PointerInputRedirection handles those
++// compositor-side, independent of client delivery.
++void AnlandInputDevice::pointerMotionAbsolute(const QPointF &position)
++{
++    Q_EMIT InputDevice::pointerMotionAbsolute(position, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
++}
++
++void AnlandInputDevice::pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel)
++{
++    Q_EMIT InputDevice::pointerMotionAbsolute(pos, now(), this);
++    Q_EMIT InputDevice::pointerMotion(delta, deltaUnaccel, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
++}
++
++void AnlandInputDevice::pointerButton(quint32 button, bool pressed)
++{
++    Q_EMIT pointerButtonChanged(button,
++                                pressed ? PointerButtonState::Pressed : PointerButtonState::Released,
++                                now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
++}
++
++void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120)
++{
++    const PointerAxisSource source =
++        deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
++    // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
++    // the daemon already delivers deltas in KWin's direction, so it is never set.
++    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, now(), this);
++    Q_EMIT InputDevice::pointerFrame(this);
++}
++
++void AnlandInputDevice::keyboardKey(quint32 keycode, bool pressed)
++{
++    Q_EMIT keyChanged(keycode,
++                      pressed ? KeyboardKeyState::Pressed : KeyboardKeyState::Released,
++                      now(), this);
++}
++
++void AnlandInputDevice::touchDown(qint32 id, const QPointF &position)
++{
++    Q_EMIT InputDevice::touchDown(id, position, now(), this);
++}
++
++void AnlandInputDevice::touchMotion(qint32 id, const QPointF &position)
++{
++    Q_EMIT InputDevice::touchMotion(id, position, now(), this);
++}
++
++void AnlandInputDevice::touchUp(qint32 id)
++{
++    Q_EMIT InputDevice::touchUp(id, now(), this);
++}
++
++void AnlandInputDevice::touchFrame()
++{
++    Q_EMIT InputDevice::touchFrame(this);
++}
++
++void AnlandInputDevice::touchCancel()
++{
++    Q_EMIT touchCanceled(this);
++}
++
++AnlandInputBackend::AnlandInputBackend(AnlandBackend *backend)
++    : m_backend(backend)
++{
++}
++
++void AnlandInputBackend::initialize()
++{
++    if (AnlandInputDevice *device = m_backend->inputDevice()) {
++        Q_EMIT deviceAdded(device);
++    }
++}
++
++} // namespace KWin
++
++#include "moc_anland_input.cpp"
+diff --git a/src/backends/anland/anland_input.h b/src/backends/anland/anland_input.h
+new file mode 100644
+index 0000000000..787f146c9a
+--- /dev/null
++++ b/src/backends/anland/anland_input.h
+@@ -0,0 +1,72 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++
++    Input for the anland backend. A single combined InputDevice (pointer +
++    keyboard + touch) fed from the display daemon's data fd. Mirrors the single
++    weston_seat that weston's backend-anland sets up.
++*/
++#pragma once
++
++#include "core/inputbackend.h"
++#include "core/inputdevice.h"
++
++namespace KWin
++{
++
++class AnlandBackend;
++
++class AnlandInputDevice : public InputDevice
++{
++    Q_OBJECT
++
++public:
++    explicit AnlandInputDevice(QObject *parent = nullptr);
++
++    QString name() const override;
++    bool isEnabled() const override;
++    void setEnabled(bool enabled) override;
++    LEDs leds() const override;
++    void setLeds(LEDs leds) override;
++
++    bool isKeyboard() const override;
++    bool isPointer() const override;
++    bool isTouchpad() const override;
++    bool isTouch() const override;
++    bool isTabletTool() const override;
++    bool isTabletPad() const override;
++    bool isTabletModeSwitch() const override;
++    bool isLidSwitch() const override;
++
++    // Event injection helpers (called by AnlandBackend from the data-fd reader).
++    void pointerMotionAbsolute(const QPointF &position);
++    void pointerMotion(const QPointF &pos, const QPointF &delta, const QPointF &deltaUnaccel);
++    void pointerButton(quint32 button, bool pressed);
++    void pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV120);
++    void keyboardKey(quint32 keycode, bool pressed);
++    void touchDown(qint32 id, const QPointF &position);
++    void touchMotion(qint32 id, const QPointF &position);
++    void touchUp(qint32 id);
++    void touchFrame();
++    void touchCancel();
++
++private:
++    bool m_enabled = true;
++};
++
++class AnlandInputBackend : public InputBackend
++{
++    Q_OBJECT
++
++public:
++    explicit AnlandInputBackend(AnlandBackend *backend);
++
++    void initialize() override;
++
++private:
++    AnlandBackend *m_backend;
++};
++
++} // namespace KWin
+diff --git a/src/backends/anland/anland_logging.cpp b/src/backends/anland/anland_logging.cpp
+new file mode 100644
+index 0000000000..130469fb4d
+--- /dev/null
++++ b/src/backends/anland/anland_logging.cpp
+@@ -0,0 +1,8 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#include "anland_logging.h"
++Q_LOGGING_CATEGORY(KWIN_ANLAND, "kwin_backend_anland", QtWarningMsg)
+diff --git a/src/backends/anland/anland_logging.h b/src/backends/anland/anland_logging.h
+new file mode 100644
+index 0000000000..d3928b8366
+--- /dev/null
++++ b/src/backends/anland/anland_logging.h
+@@ -0,0 +1,10 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#pragma once
++#include <QDebug>
++#include <QLoggingCategory>
++Q_DECLARE_LOGGING_CATEGORY(KWIN_ANLAND)
+diff --git a/src/backends/anland/anland_output.cpp b/src/backends/anland/anland_output.cpp
+new file mode 100644
+index 0000000000..112036557e
+--- /dev/null
++++ b/src/backends/anland/anland_output.cpp
+@@ -0,0 +1,192 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++*/
++#include "anland_output.h"
++#include "anland_backend.h"
++#include "anland_logging.h"
++
++#include "core/renderbackend.h" // OutputFrame
++#include "core/renderloop.h"
++
++#include <chrono>
++
++namespace KWin
++{
++
++AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
++    : BackendOutput()
++    , m_backend(parent)
++    , m_renderLoop(std::make_unique<RenderLoop>(this))
++{
++    setInformation(Information{
++        .name = name,
++        .manufacturer = QStringLiteral("anland"),
++        .model = QStringLiteral("anland"),
++        .internal = true,
++    });
++}
++
++AnlandOutput::~AnlandOutput()
++{
++}
++
++RenderLoop *AnlandOutput::renderLoop() const
++{
++    return m_renderLoop.get();
++}
++
++bool AnlandOutput::testPresentation(const std::shared_ptr<OutputFrame> &frame)
++{
++    return true;
++}
++
++bool AnlandOutput::present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame)
++{
++    // The scene has already been rendered into the daemon's dmabuf by the layer
++    // (AnlandEglLayer::doEndFrame). Hand it to the consumer now.
++    m_frame = frame;
++    const bool handedToConsumer = m_backend->notifyFramePresented();
++    if (handedToConsumer) {
++        // The consumer will present the buffer and then signal buffer-ready;
++        // defer frame completion until then (see onConsumerReady()).
++        m_awaitingPresent = true;
++    } else {
++        // Nothing was handed to the consumer this frame, so no buffer-ready will
++        // arrive for it — complete it now so the RenderLoop never stalls.
++        completeFrame();
++    }
++    return true;
++}
++
++void AnlandOutput::init(const QSize &pixelSize, int refresh, qreal scale)
++{
++    // refresh is in mHz, like RenderLoop/OutputMode expect.
++    if (refresh <= 0) {
++        refresh = 120000;
++    }
++    m_renderLoop->setRefreshRate(refresh);
++
++    auto mode = std::make_shared<OutputMode>(OutputModeline(pixelSize, refresh, OutputModeline::Flag::Preferred));
++
++    setState(State{
++        .position = QPoint(0, 0),
++        .scale = scale,
++        .modes = {mode},
++        .currentMode = mode,
++    });
++}
++
++void AnlandOutput::updateEnabled(bool enabled)
++{
++    State next = m_state;
++    next.enabled = enabled;
++    setState(next);
++}
++
++void AnlandOutput::setRefreshRate(int refresh)
++{
++    // refresh is in mHz. Ignore noise and no-op changes; RenderLoop::setRefreshRate
++    // already guards the latter, but we also skip rebuilding the mode below.
++    if (refresh <= 0 || refresh == m_renderLoop->refreshRate()) {
++        return;
++    }
++    m_renderLoop->setRefreshRate(refresh);
++
++    // Keep the OutputMode in lockstep with the RenderLoop, mirroring init(), so
++    // currentMode()->refreshRate() and any mode-based logic see the new rate.
++    auto mode = std::make_shared<OutputMode>(OutputModeline(modeSize(), refresh, OutputModeline::Flag::Preferred));
++    State next = m_state;
++    next.modes = {mode};
++    next.currentMode = mode;
++    setState(next);
++}
++
++void AnlandOutput::completeFrame()
++{
++    if (!m_frame) {
++        return;
++    }
++    const auto now = std::chrono::steady_clock::now().time_since_epoch();
++    m_frame->presented(now, PresentationMode::VSync);
++    m_frame.reset();
++}
++
++void AnlandOutput::onConsumerReady()
++{
++    if (m_awaitingPresent) {
++        m_awaitingPresent = false;
++        completeFrame();
++    }
++    // Render the next frame in lockstep with the consumer, exactly as the 5.27
++    // backend did: the consumer's buffer-ready drives scheduleRepaint().
++    m_renderLoop->scheduleRepaint();
++}
++
++void AnlandOutput::resize(const QSize &newSize)
++{
++    if (newSize == modeSize() || !newSize.isValid())
++        return;
++
++    qCInfo(KWIN_ANLAND) << "resizing output to" << newSize;
++
++    // Keep the same refresh rate; update both the OutputMode and the RenderLoop
++    // pacing. Mirroring setRefreshRate() / init().
++    const int refresh = m_renderLoop->refreshRate();
++    auto mode = std::make_shared<OutputMode>(OutputModeline(newSize, refresh, OutputModeline::Flag::Preferred));
++    State next = m_state;
++    next.modes = {mode};
++    next.currentMode = mode;
++    setState(next);
++
++    // setState() only emits currentModeChanged(); that does NOT re-lay-out windows.
++    // The Workspace recomputes geometry in updateOutputs()/desktopResized(), which is
++    // driven by OutputBackend::outputsQueried (see Workspace ctor). Since we changed
++    // the mode directly here rather than through OutputConfiguration, emit it now so
++    // the compositor recalculates the layout for the new size.
++    m_backend->notifyOutputsChanged();
++
++    // Invalidate any in-flight frame: the mode just changed, so the buffer that was
++    // being presented corresponds to a different layout.
++    if (m_awaitingPresent) {
++        m_awaitingPresent = false;
++        m_frame.reset();
++    }
++}
++
++void AnlandOutput::setEglLayer(AnlandEglLayer *layer)
++{
++    m_eglLayer = layer;
++}
++
++AnlandEglLayer *AnlandOutput::eglLayer() const
++{
++    return m_eglLayer;
++}
++
++void AnlandOutput::stopRendering()
++{
++    if (m_awaitingPresent) {
++        m_awaitingPresent = false;
++        m_frame.reset();
++    }
++
++    if (!m_renderingInhibited) {
++        m_renderLoop->inhibit();
++        m_renderingInhibited = true;
++    }
++}
++
++void AnlandOutput::resumeRendering()
++{
++    if (m_renderingInhibited) {
++        m_renderLoop->uninhibit();
++        m_renderingInhibited = false;
++    }
++}
++
++} // namespace KWin
++
++#include "moc_anland_output.cpp"
+diff --git a/src/backends/anland/anland_output.h b/src/backends/anland/anland_output.h
+new file mode 100644
+index 0000000000..f99687c40b
+--- /dev/null
++++ b/src/backends/anland/anland_output.h
+@@ -0,0 +1,92 @@
++/*
++    KWin - the KDE window manager
++    This file is part of the KDE project.
++
++    SPDX-License-Identifier: GPL-2.0-or-later
++
++    Native output for the "anland" backend. The render cycle is paced by the
++    display daemon's transport, not a software timer: present() hands the buffer
++    to the consumer (a render-done message on the dedicated fence channel) and the
++    consumer's buffer-ready signal (buf_ready_efd) completes the frame — mirroring
++    how the DRM backend completes a frame on a page-flip event. This keeps KWin's
++    compositing in lockstep with the frontend instead of free-running on a vsync timer.
++*/
++#pragma once
++
++#include "core/backendoutput.h"
++
++#include <QObject>
++#include <memory>
++
++namespace KWin
++{
++
++class AnlandBackend;
++class AnlandEglLayer;
++class OutputFrame;
++class OutputLayer;
++class RenderLoop;
++
++class AnlandOutput : public BackendOutput
++{
++    Q_OBJECT
++
++public:
++    AnlandOutput(AnlandBackend *parent, const QString &name);
++    ~AnlandOutput() override;
++
++    RenderLoop *renderLoop() const override;
++    bool testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
++    bool present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
++
++    /** @p pixelSize and @p refresh (in mHz) come from the display daemon. */
++    void init(const QSize &pixelSize, int refresh, qreal scale);
++    void updateEnabled(bool enabled);
++
++    /** Retune the render cycle when the consumer reports a new display refresh
++     *  rate at runtime (INPUT_TYPE_DISPLAY_REFRESH). @p refresh is in mHz; values
++     *  <= 0 or equal to the current rate are ignored. Updates both the RenderLoop
++     *  pacing and the OutputMode so currentMode() stays consistent. */
++    void setRefreshRate(int refresh);
++
++    /** Consumer signalled buffer-ready (buf_ready_efd): complete the in-flight
++     *  frame and schedule the next one, keeping the cycle consumer-paced. */
++    void onConsumerReady();
++
++    /** Reconfigure the output when the consumer uses a different buffer size
++     *  (e.g. screen rotation / resolution switch). Updates the OutputMode and asks
++     *  the backend to emit outputsQueried() so the Workspace re-lays-out windows
++     *  for the new size — currentModeChanged() alone does not trigger a relayout. */
++    void resize(const QSize &newSize);
++
++    /** Consumer went away (fallback): fail any in-flight frame and inhibit() the
++     *  RenderLoop so the compositor stops trying to render into dmabufs that no
++     *  longer exist. */
++    void stopRendering();
++
++    /** Consumer reconnected: uninhibit() the RenderLoop so compositing resumes. */
++    void resumeRendering();
++
++    /** The primary render layer for this output. Owned by AnlandEglBackend and
++     *  wired up in AnlandEglBackend::addOutput(); null while no render backend is
++     *  attached. Lets AnlandBackend drive the layer through its output — e.g.
++     *  schedule a repaint when leaving fallback. */
++    void setEglLayer(AnlandEglLayer *layer);
++    AnlandEglLayer *eglLayer() const;
++
++private:
++    void completeFrame();
++
++    Q_DISABLE_COPY(AnlandOutput);
++
++    AnlandBackend *m_backend;
++    std::unique_ptr<RenderLoop> m_renderLoop;
++    std::shared_ptr<OutputFrame> m_frame;
++    AnlandEglLayer *m_eglLayer = nullptr;
++    bool m_awaitingPresent = false;
++    // Tracks our RenderLoop::inhibit() so inhibit/uninhibit stay balanced
++    // (uninhibit() asserts the count is > 0). See onConsumerLost()/resumeRendering().
++    bool m_renderingInhibited = false;
++};
++
++} // namespace KWin
+diff --git a/src/backends/anland/display_producer.c b/src/backends/anland/display_producer.c
+new file mode 100644
+index 0000000000..a9deafd548
+--- /dev/null
++++ b/src/backends/anland/display_producer.c
+@@ -0,0 +1,523 @@
++#define _GNU_SOURCE
++#include "display_producer.h"
++#include "socket_utils.h"
++
++#include <errno.h>
++#include <poll.h>
++#include <stdbool.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++/* poll() timeout (ms) for the two reconnect handshake steps. Kept short so the
++ * caller's reconnect loop stays responsive when no consumer is present yet. */
++#define HANDSHAKE_TIMEOUT_MS 100
++
++struct display_ctx {
++    int      ctrl_fd;
++    int      data_fd;
++    int      buf_ready_efd;
++    int      fence_fd;        /* write end of the dedicated render-done fence channel */
++    int      shm_fd;
++    int      audio_fd;        /* local end of the bidirectional audio socketpair (hello slot 4) */
++    int      pending_render_fence; /* render-done fence for the in-flight frame */
++    volatile uint32_t *shm_ptr;
++    uint32_t screen_w, screen_h;
++    uint32_t pixel_format;
++    uint32_t refresh;
++    bool     fallback;
++
++    int      dmabuf_fds[MAX_BUFS];
++    struct buf_info dmabuf_infos[MAX_BUFS];
++    int      buf_count;
++
++    void (*fallback_cb)(void *);
++    void  *fallback_userdata;
++};
++
++/*
++ * Release every consumer-side resource (dmabuf fds, the four picked-up fds and the
++ * shm mapping), leaving the context holding only the daemon ctrl_fd. Does NOT touch
++ * the fallback flag or fire the fallback callback — callers decide that. Idempotent.
++ */
++static void release_consumer_resources(display_ctx *ctx)
++{
++    for (int i = 0; i < ctx->buf_count; i++) {
++        if (ctx->dmabuf_fds[i] >= 0) {
++            close(ctx->dmabuf_fds[i]);
++            ctx->dmabuf_fds[i] = -1;
++        }
++    }
++    ctx->buf_count = 0;
++
++    if (ctx->data_fd >= 0)          { close(ctx->data_fd);          ctx->data_fd = -1; }
++    if (ctx->buf_ready_efd >= 0)    { close(ctx->buf_ready_efd);    ctx->buf_ready_efd = -1; }
++    if (ctx->fence_fd >= 0)         { close(ctx->fence_fd);         ctx->fence_fd = -1; }
++    if (ctx->audio_fd >= 0)         { close(ctx->audio_fd);         ctx->audio_fd = -1; }
++    if (ctx->pending_render_fence >= 0) { close(ctx->pending_render_fence); ctx->pending_render_fence = -1; }
++    if (ctx->shm_ptr)               { munmap((void *)ctx->shm_ptr, sizeof(uint32_t)); ctx->shm_ptr = NULL; }
++    if (ctx->shm_fd >= 0)           { close(ctx->shm_fd);           ctx->shm_fd = -1; }
++}
++
++static void enter_fallback(display_ctx *ctx)
++{
++    if (ctx->fallback)
++        return;
++    ctx->fallback = true;
++
++    release_consumer_resources(ctx);
++
++    if (ctx->fallback_cb)
++        ctx->fallback_cb(ctx->fallback_userdata);
++}
++
++/*
++ * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
++ * with a short timeout so it returns promptly when no consumer is up yet. On
++ * success the four fds and shm_ptr are installed on ctx; the caller releases them
++ * via release_consumer_resources() on any later failure. Returns 0 / -1.
++ */
++static int pickup_fds(display_ctx *ctx)
++{
++    struct ctrl_msg hdr = { .type = CTRL_MSG_PICKUP_FDS, .size = 0 };
++    if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
++        return -1;
++
++    struct pollfd pfd = { .fd = ctx->ctrl_fd, .events = POLLIN };
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
++        return -1;
++
++    int fds[5];
++    int fd_count = 0;
++    struct ctrl_msg resp;
++    int n = recv_fds(ctx->ctrl_fd, &resp, sizeof(resp), fds, 5, &fd_count);
++    if (n <= 0 || resp.type != CTRL_MSG_FDS_READY || fd_count < 5) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    /* Slot order matches the consumer's send_hello_fds(): { buf_ready, fence, data, shm, audio }.
++     * fence_fd is the write end of the dedicated producer->consumer render-done channel;
++     * audio_fd is the full-duplex PCM socket (producer writes playback, reads mic). */
++    ctx->buf_ready_efd    = fds[0];
++    ctx->fence_fd         = fds[1];
++    ctx->data_fd          = fds[2];
++    ctx->shm_fd           = fds[3];
++    ctx->audio_fd         = fds[4];
++
++    ctx->shm_ptr = mmap(NULL, sizeof(uint32_t), PROT_READ, MAP_SHARED, ctx->shm_fd, 0);
++    if (ctx->shm_ptr == MAP_FAILED) {
++        ctx->shm_ptr = NULL;
++        return -1;
++    }
++    return 0;
++}
++
++/*
++ * Receive the dmabuf set the consumer pushes onto the data channel right after the
++ * fd handshake. Polls data_fd with a short timeout. On failure the caller releases
++ * the partially-acquired consumer resources. Returns 0 / -1.
++ */
++static int receive_dmabufs(display_ctx *ctx)
++{
++    if (ctx->buf_count > 0)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN | POLLHUP | POLLERR };
++    if (poll(&pfd, 1, HANDSHAKE_TIMEOUT_MS) <= 0)
++        return -1;
++    if (pfd.revents & (POLLHUP | POLLERR))
++        return -1;
++
++    struct data_msg dhdr;
++    int fds[MAX_BUFS];
++    int fd_count = 0;
++
++    int n = recv_fds(ctx->data_fd, &dhdr, sizeof(dhdr), fds, MAX_BUFS, &fd_count);
++    if (n < (int)sizeof(struct data_msg) || fd_count < 1)
++        return -1;
++
++    if (dhdr.type != DATA_MSG_BUFS_READY) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    int count = dhdr.size / sizeof(struct buf_info);
++    if (count != fd_count || count > MAX_BUFS) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    struct buf_info infos[MAX_BUFS];
++    if (recv_all(ctx->data_fd, infos, dhdr.size) < 0) {
++        for (int i = 0; i < fd_count; i++)
++            close(fds[i]);
++        return -1;
++    }
++
++    for (int i = 0; i < count; i++) {
++        ctx->dmabuf_fds[i] = fds[i];
++        ctx->dmabuf_infos[i] = infos[i];
++    }
++    ctx->buf_count = count;
++    return 0;
++}
++
++int connect_to_deamon(display_ctx **out, const char *socket_path)
++{
++    display_ctx *ctx = calloc(1, sizeof(*ctx));
++    if (!ctx)
++        return -1;
++
++    ctx->ctrl_fd = -1;
++    ctx->data_fd = -1;
++    ctx->buf_ready_efd = -1;
++    ctx->fence_fd = -1;
++    ctx->shm_fd = -1;
++    ctx->audio_fd = -1;
++    ctx->pending_render_fence = -1;
++    ctx->shm_ptr = NULL;
++    ctx->fallback = true; // stay in fallback until try_exit_fallback() succeeds
++    for (int i = 0; i < MAX_BUFS; i++)
++        ctx->dmabuf_fds[i] = -1;
++
++    ctx->ctrl_fd = connect_unix(socket_path);
++    if (ctx->ctrl_fd < 0)
++        goto fail;
++
++    struct ctrl_msg hdr = { .type = CTRL_MSG_PRODUCER_HELLO, .size = 0 };
++    if (send_all(ctx->ctrl_fd, &hdr, sizeof(hdr)) < 0)
++        goto fail;
++
++    uint8_t buf[sizeof(struct ctrl_msg) + sizeof(struct screen_info)];
++    if (recv_all(ctx->ctrl_fd, buf, sizeof(buf)) < 0)
++        goto fail;
++
++    struct ctrl_msg resp;
++    memcpy(&resp, buf, sizeof(resp));
++    if (resp.type != CTRL_MSG_SCREEN_INFO || resp.size != sizeof(struct screen_info))
++        goto fail;
++
++    struct screen_info si;
++    memcpy(&si, buf + sizeof(struct ctrl_msg), sizeof(si));
++    ctx->screen_w = si.width;
++    ctx->screen_h = si.height;
++    ctx->pixel_format = si.format;
++    ctx->refresh = si.refresh;
++
++    // Daemon handshake only: screen info is in hand, but the consumer fds and
++    // dmabufs are deliberately left for try_exit_fallback() so the backend brings
++    // the consumer up through the single reconnect path. Stay in fallback.
++    *out = ctx;
++    return 0;
++
++fail:
++    if (ctx->ctrl_fd >= 0)
++        close(ctx->ctrl_fd);
++    free(ctx);
++    return -1;
++}
++
++void disconnect(display_ctx *ctx)
++{
++    if (!ctx)
++        return;
++    release_consumer_resources(ctx);
++    if (ctx->ctrl_fd >= 0)
++        close(ctx->ctrl_fd);
++    free(ctx);
++}
++
++int get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh)
++{
++    *width  = ctx->screen_w;
++    *height = ctx->screen_h;
++    *format = ctx->pixel_format;
++    *refresh = ctx->refresh;
++    return 0;
++}
++
++/* Stash the render-done fence for the in-flight frame (created in doEndFrame).
++ * trigger_refresh sends it to the consumer. Closes any previous unconsumed stash. */
++void set_render_fence(display_ctx *ctx, int fence_fd)
++{
++    if (ctx->pending_render_fence >= 0)
++        close(ctx->pending_render_fence);
++    ctx->pending_render_fence = fence_fd;
++}
++
++int trigger_refresh(display_ctx *ctx)
++{
++    if (ctx->fallback) {
++        if (ctx->pending_render_fence >= 0) {
++            close(ctx->pending_render_fence);
++            ctx->pending_render_fence = -1;
++        }
++        return 0;
++    }
++
++    /* Send exactly one render-done message per frame on the dedicated fence channel
++     * (producer->consumer). The message itself is the "frame rendered" signal -- no
++     * separate eventfd, no cross-channel ordering. The render fence rides as
++     * SCM_RIGHTS ancillary data when we have one; otherwise a bare byte is sent so
++     * the consumer's per-frame recv always has exactly one message (it then queues
++     * with -1). The consumer hands the fence to queueBuffer -> SurfaceFlinger waits
++     * GPU-side. NON-BLOCKING: this runs on kwin's main thread, which must never block
++     * on our socket. In lockstep the consumer always drains, so the one-message
++     * buffer never fills; a momentary miss self-heals via the consumer's 5s
++     * poll->fallback rather than freezing the compositor. data_fd's reverse direction
++     * is intentionally left unused (reserved for future extension). */
++    char b = 0;
++    struct iovec iov = { .iov_base = &b, .iov_len = 1 };
++    union {
++        char buf[CMSG_SPACE(sizeof(int))];
++        struct cmsghdr align;
++    } cmsg;
++    struct msghdr msg = {
++        .msg_iov = &iov,
++        .msg_iovlen = 1,
++    };
++    if (ctx->pending_render_fence >= 0) {
++        msg.msg_control = cmsg.buf;
++        msg.msg_controllen = sizeof(cmsg.buf);
++        struct cmsghdr *c = CMSG_FIRSTHDR(&msg);
++        c->cmsg_level = SOL_SOCKET;
++        c->cmsg_type = SCM_RIGHTS;
++        c->cmsg_len = CMSG_LEN(sizeof(int));
++        memcpy(CMSG_DATA(c), &ctx->pending_render_fence, sizeof(int));
++    }
++    sendmsg(ctx->fence_fd, &msg, MSG_NOSIGNAL | MSG_DONTWAIT);
++    if (ctx->pending_render_fence >= 0) {
++        close(ctx->pending_render_fence);
++        ctx->pending_render_fence = -1;
++    }
++    return 0;
++}
++
++int poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
++    int ret = poll(&pfd, 1, timeout_ms);
++    if (ret <= 0)
++        return 0;
++
++    if (pfd.revents & (POLLHUP | POLLERR)) {
++        enter_fallback(ctx);
++        return -1;
++    }
++
++    uint8_t msg_buf[sizeof(struct data_msg) + sizeof(struct InputEvent)];
++    ssize_t n = recv(ctx->data_fd, msg_buf, sizeof(msg_buf), MSG_PEEK);
++    if (n < (ssize_t)sizeof(struct data_msg))
++        return 0;
++
++    struct data_msg hdr;
++    memcpy(&hdr, msg_buf, sizeof(hdr));
++    if (hdr.type != DATA_MSG_INPUT_EVENT)
++        return 0;
++
++    if (recv_all(ctx->data_fd, msg_buf, sizeof(struct data_msg) + sizeof(struct InputEvent)) < 0)
++        return -1;
++
++    memcpy(event, msg_buf + sizeof(struct data_msg), sizeof(*event));
++    return 1;
++}
++int poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
++                                int *fd_count, int timeout_ms)
++{
++    *fd_count = 0;
++    if (ctx->fallback)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
++    int ret = poll(&pfd, 1, timeout_ms);
++    if (ret <= 0)
++        return 0;
++
++    if (pfd.revents & (POLLHUP | POLLERR)) {
++        enter_fallback(ctx);
++        return -1;
++    }
++
++    struct data_msg hdr;
++    int got = 0;
++    int n = recv_fds(ctx->data_fd, &hdr, sizeof(hdr), fds, max_fds, &got);
++    if (n < (int)sizeof(struct data_msg)) {
++        for (int i = 0; i < got; i++)
++            close(fds[i]);
++        return -1;
++    }
++    if (hdr.type != DATA_MSG_INPUT_EXTEND_FDS) {
++        for (int i = 0; i < got; i++)
++            close(fds[i]);
++        return -1;
++    }
++    *fd_count = got;
++    return 1;
++}
++
++int push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args)
++{
++    struct OutputEvent ev;
++    memset(&ev, 0, sizeof(ev));
++    ev.type = OUTPUT_TYPE_RESOURCES_REQUEST;
++    ev.resources_request.type = service_type;
++    if (args) {
++        ev.resources_request.args[0] = args[0];
++        ev.resources_request.args[1] = args[1];
++        ev.resources_request.args[2] = args[2];
++    }
++    return push_output_event(ctx, &ev);
++}
++
++int push_output_event(display_ctx *ctx, const struct OutputEvent *event)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
++    uint8_t msg[sizeof(struct data_msg) + sizeof(struct OutputEvent)];
++    memcpy(msg, &hdr, sizeof(hdr));
++    memcpy(msg + sizeof(hdr), event, sizeof(*event));
++
++    if (send_all(ctx->data_fd, msg, sizeof(msg)) < 0) {
++        enter_fallback(ctx);
++        return -1;
++    }
++    return 0;
++}
++int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct data_msg hdr = { .type = DATA_MSG_OUTPUT_EVENT, .size = sizeof(struct OutputEvent) };
++    uint8_t *msg = (uint8_t *)malloc(sizeof(struct data_msg) + sizeof(struct OutputEvent) + size);
++    memcpy(msg, &hdr, sizeof(hdr));
++    memcpy(msg + sizeof(hdr), event, sizeof(*event));
++    memcpy(msg + sizeof(hdr) + sizeof(struct OutputEvent), payload, size);
++
++    if (send_all(ctx->data_fd, msg, sizeof(struct data_msg) + sizeof(struct OutputEvent) + size) < 0) {
++        free(msg);
++        enter_fallback(ctx);
++        return -1;
++    }
++    free(msg);
++    return 0;
++}
++int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms)
++{
++    if (ctx->fallback)
++        return 0;
++
++    struct pollfd pfd = { .fd = ctx->data_fd, .events = POLLIN };
++    int ret = poll(&pfd, 1, timeout_ms);
++    if (ret <= 0)
++        return 0;
++
++    if (pfd.revents & (POLLHUP | POLLERR)) {
++        enter_fallback(ctx);
++        return -1;
++    }
++    if (recv_all(ctx->data_fd, payload, size) < 0)
++        return -1;
++    return 1;
++}
++int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata)
++{
++    ctx->fallback_cb = on_fallback;
++    ctx->fallback_userdata = userdata;
++    return 0;
++}
++
++bool is_fallback(display_ctx *ctx)
++{
++    return ctx->fallback;
++}
++
++int try_exit_fallback(display_ctx *ctx)
++{
++    if (!ctx->fallback)
++        return 0;
++
++    // Step 1: ask the daemon to hand over the consumer-side fds.
++    if (pickup_fds(ctx) < 0) {
++        release_consumer_resources(ctx);
++        return -1;
++    }
++
++    // Step 2: immediately pull the dmabuf set the consumer pushes right after the
++    // fd handshake. Only leave fallback once both fds and dmabufs are in hand, so
++    // the backend can import straight away.
++    if (receive_dmabufs(ctx) < 0) {
++        release_consumer_resources(ctx);
++        return -1;
++    }
++
++    ctx->fallback = false;
++    return 0;
++}
++
++int get_data_fd(display_ctx *ctx)
++{
++    return ctx->data_fd;
++}
++
++/* Current local end of the audio socketpair, or -1 in fallback. The value changes
++ * across reconnects (each pickup installs a fresh socket), so the audio engine must
++ * be re-pointed via anland_audio_set_fd() rather than caching it. */
++int get_audio_fd(display_ctx *ctx)
++{
++    return ctx->fallback ? -1 : ctx->audio_fd;
++}
++
++int get_buffer_ready_fd(display_ctx *ctx)
++{
++    return ctx->buf_ready_efd;
++}
++
++int get_buf_count(display_ctx *ctx)
++{
++    return ctx->buf_count;
++}
++
++int get_selected_idx(display_ctx *ctx)
++{
++    if (!ctx->shm_ptr)
++        return 0;
++    uint32_t idx = *ctx->shm_ptr;
++    return (idx < (uint32_t)ctx->buf_count) ? (int)idx : 0;
++}
++
++int get_dmabuf_fd(display_ctx *ctx)
++{
++    return get_dmabuf_fd_at(ctx, get_selected_idx(ctx));
++}
++
++int get_dmabuf_fd_at(display_ctx *ctx, int idx)
++{
++    if (idx < 0 || idx >= ctx->buf_count)
++        return -1;
++    return ctx->dmabuf_fds[idx];
++}
++
++int get_dmabuf_info(display_ctx *ctx, struct buf_info *info)
++{
++    return get_dmabuf_info_at(ctx, get_selected_idx(ctx), info);
++}
++
++int get_dmabuf_info_at(display_ctx *ctx, int idx, struct buf_info *info)
++{
++    if (idx < 0 || idx >= ctx->buf_count)
++        return -1;
++    *info = ctx->dmabuf_infos[idx];
++    return 0;
++}
+diff --git a/src/backends/anland/display_producer.h b/src/backends/anland/display_producer.h
+new file mode 100644
+index 0000000000..53a5cdd3bf
+--- /dev/null
++++ b/src/backends/anland/display_producer.h
+@@ -0,0 +1,92 @@
++#ifndef DISPLAY_PRODUCER_H
++#define DISPLAY_PRODUCER_H
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++#include "protocol.h"
++
++typedef struct display_ctx display_ctx;
++
++/*
++ * Producer-side state machine
++ * ----------------------------
++ * connect_to_deamon() performs only the daemon handshake: it fetches the screen
++ * info and leaves the context in *fallback* (no consumer fds, no dmabufs). The
++ * backend then drives a reconnect loop that polls try_exit_fallback(); once that
++ * call succeeds the context owns the consumer fds and the dmabuf set, and
++ * is_fallback() returns false. Losing the consumer drops the context back to
++ * fallback (see set_fallback_callback) and the loop resumes.
++ */
++
++/* Connect to the daemon and fetch screen info only. Leaves the context in
++ * fallback: it does NOT pick up consumer fds or dmabufs. Returns 0 / -1. */
++int  connect_to_deamon(display_ctx **ctx, const char *socket_path);
++
++/* Tear down everything and disconnect from the daemon. */
++void disconnect(display_ctx *ctx);
++
++int  get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh);
++
++/* Stash the render-done fence (created in doEndFrame) for the current frame. The
++ * next trigger_refresh hands it to the consumer on the dedicated fence channel, so
++ * SurfaceFlinger waits on it GPU-side instead of the producer CPU-blocking.
++ * Takes ownership of fence_fd (-1 = none). */
++void set_render_fence(display_ctx *ctx, int fence_fd);
++
++/* Signal the consumer that the current frame is done by sending one message (with
++ * the render fence, if any) on the dedicated fence channel. No-op in fallback. */
++int  trigger_refresh(display_ctx *ctx);
++
++/* Pull one pending input event. Returns 1 if an event was written, 0 if none was
++ * available, -1 on consumer loss. No-op (returns 0) in fallback. */
++int  poll_input_event(display_ctx *ctx, struct InputEvent *event, int timeout_ms);
++int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, int timeout_ms);
++
++/* Receive the fds that follow an INPUT_TYPE_RESOURCE event (a DATA_MSG_INPUT_EXTEND_FDS
++ * message carrying the service's fds as SCM_RIGHTS). Call this right after
++ * poll_input_event() returns an INPUT_TYPE_RESOURCE event, using event.resource.fdnum
++ * as the expected count. Writes up to max_fds received fds into fds[] and the actual
++ * count into *fd_count. Returns 1 on success, 0 if nothing was pending, -1 on error
++ * (consumer loss). The caller owns the received fds and must close them. */
++int  poll_input_event_extend_fds(display_ctx *ctx, int *fds, int max_fds,
++                                 int *fd_count, int timeout_ms);
++
++/* Ask the consumer for a service's resources (e.g. SERVICE_TYPE_CAMERA). Sends an
++ * OUTPUT_TYPE_RESOURCES_REQUEST; the consumer replies asynchronously with an
++ * INPUT_TYPE_RESOURCE event + fds on the data channel. args may be NULL (treated as
++ * three zeros). No-op (returns 0) in fallback. */
++int  push_resources_request(display_ctx *ctx, uint32_t service_type, const uint32_t *args);
++
++int push_output_event(display_ctx *ctx, const struct OutputEvent *event);
++//接收到输出事件时，可能会有额外的数据需要接收，所以增加一个带长度的版本
++//但是发送方必须设置变长事件的size字段，表示随后数据的大小，而且必须紧跟事件发送数据
++//变长事件不得使用push_output_event发送，必须使用push_output_event_with_length发送
++//接收端使用标准事件接收后根据size字段知道后续数据的大小，务必使用socket手动接收变长数据（必须有超时，避免对端挂掉）
++int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size);
++/* Register a callback invoked when the consumer is lost and the context drops
++ * back to fallback. */
++int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
++
++bool is_fallback(display_ctx *ctx);
++
++/* Attempt to leave fallback: pick up the consumer fds and immediately receive the
++ * dmabuf set (the consumer sends the dmabufs right after the fd handshake). Clears
++ * fallback only when BOTH the fds and the dmabufs are in hand, so on a 0 return the
++ * dmabufs are ready to import right away. Returns 0 on success, -1 if there is
++ * still no consumer (stays in fallback; safe to retry on the next tick). */
++int  try_exit_fallback(display_ctx *ctx);
++
++int  get_data_fd(display_ctx *ctx);
++/* Current local end of the audio socketpair, or -1 in fallback. Changes across
++ * reconnects; re-point the audio engine on each exit/enter fallback. */
++int  get_audio_fd(display_ctx *ctx);
++int  get_buffer_ready_fd(display_ctx *ctx);
++int  get_buf_count(display_ctx *ctx);
++int  get_selected_idx(display_ctx *ctx);
++int  get_dmabuf_fd(display_ctx *ctx);
++int  get_dmabuf_fd_at(display_ctx *ctx, int idx);
++int  get_dmabuf_info(display_ctx *ctx, struct buf_info *info);
++int  get_dmabuf_info_at(display_ctx *ctx, int idx, struct buf_info *info);
++
++#endif
+diff --git a/src/backends/anland/protocol.h b/src/backends/anland/protocol.h
+new file mode 100644
+index 0000000000..c76b5063a6
+--- /dev/null
++++ b/src/backends/anland/protocol.h
+@@ -0,0 +1,194 @@
++#ifndef DISPLAY_PROTOCOL_H
++#define DISPLAY_PROTOCOL_H
++
++#include <stdint.h>
++
++#define CTRL_MSG_CONSUMER_HELLO  1
++#define CTRL_MSG_PRODUCER_HELLO  2
++#define CTRL_MSG_SCREEN_INFO     7
++#define CTRL_MSG_REJECT          8
++#define CTRL_MSG_PICKUP_FDS      9
++#define CTRL_MSG_FDS_READY      10
++
++#define DATA_MSG_BUF_READY       100
++#define DATA_MSG_REFRESH_DONE    101
++#define DATA_MSG_INPUT_EVENT     102
++#define DATA_MSG_OUTPUT_EVENT    103
++#define DATA_MSG_INPUT_EXTEND_FDS  104
++#define DATA_MSG_BUFS_READY      200
++
++#define MAX_BUFS 8
++
++struct ctrl_msg {
++    uint32_t type;
++    uint32_t size;
++    uint8_t  payload[];
++} __attribute__((packed));
++
++struct data_msg {
++    uint32_t type;
++    uint32_t size;
++    uint8_t  payload[];
++} __attribute__((packed));
++
++struct screen_info {
++    uint32_t width;
++    uint32_t height;
++    uint32_t format;
++    uint32_t refresh;
++} __attribute__((packed));
++
++struct buf_info {
++    uint32_t stride;
++    uint32_t width;      /* buffer logical width  (consumer-side native resolution) */
++    uint32_t height;     /* buffer logical height (consumer-side native resolution) */
++    uint32_t format;
++    uint64_t modifier;
++    uint32_t offset;
++} __attribute__((packed));
++
++#define INPUT_TYPE_TOUCH          1
++#define INPUT_TYPE_KEY            2
++#define INPUT_TYPE_POINTER_MOTION 3
++#define INPUT_TYPE_POINTER_BUTTON 4
++#define INPUT_TYPE_POINTER_AXIS   5
++#define INPUT_TYPE_TOUCH_FRAME    6
++/* Not really input: the consumer reports its current display refresh rate over
++ * the same data channel so the producer can repace its RenderLoop at runtime.
++ * Deliberately reuses the InputEvent framing (DATA_MSG_INPUT_EVENT) so the
++ * producer's poll_input_event() drains it like any other event instead of
++ * stalling the stream on an unknown DATA_MSG_* header. */
++#define INPUT_TYPE_DISPLAY_REFRESH 7
++#define INPUT_TYPE_CLIPBOARD      8
++#define INPUT_TYPE_TEXT_INPUT      9
++#define INPUT_TYPE_ACTION         10
++/* Consumer -> producer: hands back the fds for a requested service (e.g. camera).
++ * The InputEvent carries { service type, fdnum }; the fdnum fds follow as a
++ * separate DATA_MSG_INPUT_EXTEND_FDS message (SCM_RIGHTS). */
++#define INPUT_TYPE_RESOURCE       11
++
++/* Service identifiers used by OUTPUT_TYPE_RESOURCES_REQUEST / INPUT_TYPE_RESOURCE. */
++#define SERVICE_TYPE_CAMERA 1
++
++#define INPUT_ACTION_DOWN    0
++#define INPUT_ACTION_UP      1
++#define INPUT_ACTION_MOVE    2
++
++struct InputEvent {
++    uint32_t type;
++    union {
++        struct {
++            int32_t  action;
++            float    x;
++            float    y;
++            int32_t  pointer_id;
++        } touch;
++        struct {
++            int32_t  action;
++            int32_t  keycode;
++        } key;
++        struct {
++            float    x;
++            float    y;
++            float    dx;
++            float    dy;
++        } pointer_motion;
++        struct {
++            uint32_t button;
++            int32_t  pressed;
++        } pointer_button;
++        struct {
++            uint32_t axis;
++            float    value;
++            int32_t  discrete;
++        } pointer_axis;
++        struct {
++            uint32_t refresh_mhz; // current display refresh rate, milli-Hz
++        } display;
++        struct {
++            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
++        } clipboard;
++        struct {
++            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
++        } text_input;
++        struct {
++            uint32_t action;
++            int32_t value;
++        } input_action;
++        struct {
++            uint32_t type;
++            uint32_t fdnum;//fdnum是fd的数量,后续会有fdnum个fd跟随在这个结构体后面
++        } resource;
++        struct {
++            uint32_t padding[4];
++        };
++    };
++} __attribute__((packed));
++
++struct OutputEvent{
++    uint32_t type;
++    union {
++        struct {
++            uint32_t size; //这个packet只是通知包 作为header真正数据会集中发送,这里通知随后数据的大小
++        } clipboard;
++        struct {
++            uint32_t type;
++            uint32_t args[3]; //support 3 args
++        } resources_request;
++        struct
++        {
++            uint32_t padding[4];
++        };
++
++    };
++} __attribute__((packed));
++
++#define OUTPUT_TYPE_CLIPBOARD 1
++#define OUTPUT_TYPE_RESOURCES_REQUEST 2
++
++/*
++ * Audio runs on its own dedicated bidirectional socketpair (hello fd slot 4),
++ * deliberately kept off the data channel so a burst of PCM never head-of-line
++ * blocks input/clipboard. The socket is full duplex: the producer writes desktop
++ * playback PCM that the consumer reads, and the consumer writes microphone PCM
++ * that the producer reads -- each side only ever reads what the other wrote.
++ * Every direction sends one AUDIO_MSG_FORMAT, then a stream of AUDIO_MSG_PCM.
++ *
++ * PCM is interleaved per frame. For stereo (channels == 2) the sample order
++ * within each frame is LEFT then RIGHT, i.e. channel positions FL, FR -- the
++ * producer's SPA channel map and the consumer's AAudio stereo layout must both
++ * honour this order so the left/right channels are never swapped.
++ *
++ * Audio quality is negotiated, not pinned: the consumer owns the real hardware,
++ * so on connect it opens its AAudio streams, reads back the rate/channels the
++ * device actually chose, and sends one AUDIO_MSG_FORMAT per direction (tagged with
++ * role) to the producer. The producer builds its PipeWire sink/source to match,
++ * so neither side resamples blindly and the PCM byte math lines up on both ends.
++ */
++#define AUDIO_MSG_FORMAT 1
++#define AUDIO_MSG_PCM    2
++#define AUDIO_MSG_SHM 3 //请求使用共享内存环形缓冲区传输音频数据,而不是使用socket传输,这样可以减少数据拷贝和延迟
++#define AUDIO_MSG_SHM_FD 4 //producer -> consumer: 共享内存fd, consumer mmap后可以直接读取音频数据
++
++/* PCM sample format codes for struct audio_format.format. */
++#define AUDIO_FORMAT_S16LE 0
++
++/* Which direction a struct audio_format describes. */
++#define AUDIO_ROLE_PLAYBACK 0   /* producer -> consumer (desktop sound -> speaker) */
++#define AUDIO_ROLE_CAPTURE  1   /* consumer -> producer (mic -> virtual source)    */
++
++struct audio_format {
++    uint32_t rate;       /* frames per second the device chose, e.g. 48000 / 44100 */
++    uint32_t channels;   /* interleaved; stereo is L,R (FL,FR) */
++    uint32_t format;     /* AUDIO_FORMAT_* */
++    uint32_t role;       /* AUDIO_ROLE_* -- which direction this describes */
++    uint32_t quantum;    /* requested buffer in frames (latency preset); 0 = engine default */
++} __attribute__((packed));
++
++struct audio_msg {
++    uint32_t type;       /* AUDIO_MSG_FORMAT | AUDIO_MSG_PCM */
++    uint32_t size;       /* payload bytes that follow this header */
++} __attribute__((packed));
++
++
++#endif
+diff --git a/src/backends/anland/socket_utils.c b/src/backends/anland/socket_utils.c
+new file mode 100644
+index 0000000000..1b4ef31df3
+--- /dev/null
++++ b/src/backends/anland/socket_utils.c
+@@ -0,0 +1,121 @@
++#include "socket_utils.h"
++
++#include <errno.h>
++#include <stdint.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <unistd.h>
++
++int send_fds(int sock, const void *data, size_t data_len,
++             const int *fds, int fd_count)
++{
++    struct iovec iov = {
++        .iov_base = (void *)data,
++        .iov_len  = data_len,
++    };
++
++    char cmsg_buf[CMSG_SPACE(sizeof(int) * fd_count)];
++    memset(cmsg_buf, 0, sizeof(cmsg_buf));
++
++    struct msghdr msg = {
++        .msg_iov        = &iov,
++        .msg_iovlen     = 1,
++        .msg_control    = cmsg_buf,
++        .msg_controllen = sizeof(cmsg_buf),
++    };
++
++    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++    cmsg->cmsg_level = SOL_SOCKET;
++    cmsg->cmsg_type  = SCM_RIGHTS;
++    cmsg->cmsg_len   = CMSG_LEN(sizeof(int) * fd_count);
++    memcpy(CMSG_DATA(cmsg), fds, sizeof(int) * fd_count);
++
++    ssize_t n = sendmsg(sock, &msg, MSG_NOSIGNAL);
++    return (n == (ssize_t)data_len) ? 0 : -1;
++}
++
++int recv_fds(int sock, void *data, size_t data_len,
++             int *fds, int fd_count, int *fds_received)
++{
++    struct iovec iov = {
++        .iov_base = data,
++        .iov_len  = data_len,
++    };
++
++    char cmsg_buf[CMSG_SPACE(sizeof(int) * fd_count)];
++    memset(cmsg_buf, 0, sizeof(cmsg_buf));
++
++    struct msghdr msg = {
++        .msg_iov        = &iov,
++        .msg_iovlen     = 1,
++        .msg_control    = cmsg_buf,
++        .msg_controllen = sizeof(cmsg_buf),
++    };
++
++    ssize_t n = recvmsg(sock, &msg, 0);
++    if (n <= 0)
++        return -1;
++
++    *fds_received = 0;
++    struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++    if (cmsg && cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
++        int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
++        if (count > fd_count)
++            count = fd_count;
++        memcpy(fds, CMSG_DATA(cmsg), sizeof(int) * count);
++        *fds_received = count;
++    }
++
++    return (int)n;
++}
++
++int connect_unix(const char *path)
++{
++    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (fd < 0)
++        return -1;
++
++    struct sockaddr_un addr;
++    memset(&addr, 0, sizeof(addr));
++    addr.sun_family = AF_UNIX;
++    strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
++
++    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
++        close(fd);
++        return -1;
++    }
++    return fd;
++}
++
++int send_all(int fd, const void *buf, size_t len)
++{
++    const uint8_t *p = buf;
++    size_t sent = 0;
++    while (sent < len) {
++        ssize_t n = send(fd, p + sent, len - sent, MSG_NOSIGNAL);
++        if (n <= 0) {
++            if (n < 0 && errno == EINTR)
++                continue;
++            return -1;
++        }
++        sent += n;
++    }
++    return 0;
++}
++
++int recv_all(int fd, void *buf, size_t len)
++{
++    uint8_t *p = buf;
++    size_t got = 0;
++    while (got < len) {
++        ssize_t n = recv(fd, p + got, len - got, 0);
++        if (n <= 0) {
++            if (n < 0 && errno == EINTR)
++                continue;
++            return -1;
++        }
++        got += n;
++    }
++    return 0;
++}
+diff --git a/src/backends/anland/socket_utils.h b/src/backends/anland/socket_utils.h
+new file mode 100644
+index 0000000000..06ba8f4801
+--- /dev/null
++++ b/src/backends/anland/socket_utils.h
+@@ -0,0 +1,18 @@
++#ifndef DISPLAY_SOCKET_UTILS_H
++#define DISPLAY_SOCKET_UTILS_H
++
++#include <stddef.h>
++
++int send_fds(int sock, const void *data, size_t data_len,
++             const int *fds, int fd_count);
++
++int recv_fds(int sock, void *data, size_t data_len,
++             int *fds, int fd_count, int *fds_received);
++
++int connect_unix(const char *path);
++
++int send_all(int fd, const void *buf, size_t len);
++
++int recv_all(int fd, void *buf, size_t len);
++
++#endif
+diff --git a/src/inputmethod.cpp b/src/inputmethod.cpp
+index f3805976df..efd15c0ad9 100644
+--- a/src/inputmethod.cpp
++++ b/src/inputmethod.cpp
+@@ -502,6 +502,16 @@ void InputMethod::keysymReceived(quint32 serial, quint32 time, quint32 sym, Keyb
+     }
+ }
+ 
++void InputMethod::commitText(const QString &text)
++{
++    if (text.isEmpty()) {
++        return;
++    }
++    // Same entry point the zwp_input_method_v1 context's commitString signal is
++    // wired to (see adoptInputMethodContext): KWin decides how to deliver it.
++    commitString(m_serial++, text);
++}
++
+ void InputMethod::commitString(quint32 serial, const QString &text)
+ {
+     if (auto t2 = waylandServer()->seat()->textInputV2(); t2 && t2->isEnabled()) {
+diff --git a/src/inputmethod.h b/src/inputmethod.h
+index fa6806b241..cc382e617d 100644
+--- a/src/inputmethod.h
++++ b/src/inputmethod.h
+@@ -83,6 +83,13 @@ public:
+ 
+     void commitPendingText();
+ 
++    // Inject committed text from a compositor-side input source that does not
++    // speak zwp_input_method_v1 (e.g. the anland Android consumer's keyboard).
++    // Enters KWin's routing at the same point a real IME's commit_string does:
++    // delivered to the focused text-input client, or synthesized as key events
++    // when the client has no text-input interface enabled.
++    void commitText(const QString &text);
++
+     // for use by the QPA
+     InternalInputMethodContext *internalContext() const
+     {
+diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
+index 70432da7c8..b74061d679 100644
+--- a/src/main_wayland.cpp
++++ b/src/main_wayland.cpp
+@@ -10,6 +10,7 @@
+ 
+ #include "config-kwin.h"
+ 
++#include "backends/anland/anland_backend.h"
+ #include "backends/drm/drm_backend.h"
+ #include "backends/virtual/virtual_backend.h"
+ #include "backends/wayland/wayland_backend.h"
+@@ -378,6 +379,7 @@ int main(int argc, char *argv[])
+                                      i18n("Exits this instance so it can be restarted by kwin_wayland_wrapper."));
+ 
+     QCommandLineOption drmOption(QStringLiteral("drm"), i18n("Render through drm node."));
++    QCommandLineOption anlandOption(QStringLiteral("anland"), i18n("Render to the anland display daemon."));
+     QCommandLineOption locale1Option(QStringLiteral("locale1"), i18n("Extract locale information from locale1 rather than the user's configuration"));
+ 
+     QCommandLineParser parser;
+@@ -401,6 +403,7 @@ int main(int argc, char *argv[])
+     parser.addOption(scaleOption);
+     parser.addOption(outputCountOption);
+     parser.addOption(drmOption);
++    parser.addOption(anlandOption);
+     parser.addOption(locale1Option);
+     parser.addOption(fullscreenOption);
+ 
+@@ -467,6 +470,7 @@ int main(int argc, char *argv[])
+ #endif
+         Wayland,
+         Virtual,
++        Anland,
+     };
+ 
+     BackendType backendType;
+@@ -475,7 +479,9 @@ int main(int argc, char *argv[])
+     qreal outputScale = 1;
+ 
+     // Decide what backend to use.
+-    if (parser.isSet(drmOption)) {
++    if (parser.isSet(anlandOption)||qEnvironmentVariableIsSet("ANLAND_SOCKET")) {
++        backendType = BackendType::Anland;
++    } else if (parser.isSet(drmOption)) {
+         backendType = BackendType::Kms;
+ #if KWIN_BUILD_X11
+     } else if (parser.isSet(x11DisplayOption)) {
+@@ -585,6 +591,14 @@ int main(int argc, char *argv[])
+         }));
+         break;
+     }
++    case BackendType::Anland: {
++        // The display-daemon socket path comes from $ANLAND_SOCKET; the backend
++        // falls back to its built-in default (/tmp/display_daemon.sock) if unset.
++        const QString anlandSocket = qEnvironmentVariable("ANLAND_SOCKET");
++        a.setSession(KWin::Session::create(KWin::Session::Type::Noop));
++        a.setOutputBackend(std::make_unique<KWin::AnlandBackend>(anlandSocket));
++        break;
++    }
+     }
+ 
+     KWin::WaylandServer *server = KWin::WaylandServer::create();
+-- 
+2.47.3
+
