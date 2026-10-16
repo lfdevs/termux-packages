@@ -1,0 +1,45 @@
+From 71b4508b81b2176bc34012d0e76aad9f8ad6bc06 Mon Sep 17 00:00:00 2001
+From: KiralyCraft <alexucu@gmail.com>
+Date: Thu, 8 Oct 2026 16:20:38 +0800
+Subject: [PATCH 5/6] xwayland: do not reacquire a copied Present pixmap
+
+After a COPY Present, Idle permits the client to reuse the source pixmap
+and reset its wait fence for a later frame. The old request may still be
+queued for its delayed Complete notification. Re-executing that request
+must not wait for the source again, because that now belongs to a different
+presentation.
+
+Waiting a second time can overwrite blocking_event with the old copied
+request. That request subsequently completes without draining blocked_queue,
+leaving newer requests blocked indefinitely.
+
+Only perform acquisition before the copy. The first wait, asynchronous
+render fences, and delayed completion scheduling are unchanged.
+
+This patch is from https://github.com/lfdevs/xwayland/pull/2.
+---
+ hw/xwayland/xwayland-present.c | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/hw/xwayland/xwayland-present.c b/hw/xwayland/xwayland-present.c
+index c145bf9d4..60f88ba53 100644
+--- a/hw/xwayland/xwayland-present.c
++++ b/hw/xwayland/xwayland-present.c
+@@ -1063,8 +1063,12 @@ xwl_present_execute(present_vblank_ptr vblank, uint64_t ust, uint64_t crtc_msc)
+     }
+ 
+ retry:
+-    if (present_execute_wait(vblank, crtc_msc) ||
+-        xwl_present_wait_acquire_fence_avail(xwl_screen, vblank)) {
++    /* The source pixmap is already idle after a copy. Its wait fence may
++     * have been reset for a later Present, so do not acquire it again just
++     * to send this request's delayed completion notification. */
++    if (!event->copy_executed &&
++        (present_execute_wait(vblank, crtc_msc) ||
++         xwl_present_wait_acquire_fence_avail(xwl_screen, vblank))) {
+         if (!notify_only)
+             /* block execution of subsequent requests until this request is ready */
+             xwl_present_window->blocking_event = event->vblank.event_id;
+-- 
+2.47.3
+
