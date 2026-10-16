@@ -1,0 +1,254 @@
+From 8296377ef526063ee68269df624c42e35786202b Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 5 Jul 2026 21:49:33 +0800
+Subject: [PATCH 04/21] backends/anland: Add support for running without a DRM
+ device
+
+Allow Anland to use surfaceless EGL without a KWin render device, and guard
+KWin 6.8.0's render-device-dependent DMA-BUF and crash-report paths.
+---
+ src/backends/anland/anland_backend.cpp     | 41 ++++++++++++++++------
+ src/backends/anland/anland_backend.h       |  6 ++++
+ src/backends/anland/anland_egl_backend.cpp | 14 +++++---
+ src/compositor.cpp                         | 11 +++---
+ src/opengl/eglbackend.cpp                  | 37 +++++++++++++++++--
+ 5 files changed, 89 insertions(+), 20 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 9986fd85ce..3f429d9bc2 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -56,6 +56,11 @@ static const int s_reconnectIntervalMs = 200;
+  * backend does), then the standard render node — which on the kgsl/turnip stack
+  * is the msm node exposed at /dev/dri/renderD128.
+  */
++static std::unique_ptr<EglDisplay> createSurfacelessEglDisplay(DrmDevice *drmDevice)
++{
++    return EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr), drmDevice);
++}
++
+ static std::unique_ptr<RenderDevice> createRenderDevice(const QString &path)
+ {
+     auto drmDevice = DrmDevice::open(path);
+@@ -63,7 +68,7 @@ static std::unique_ptr<RenderDevice> createRenderDevice(const QString &path)
+         return nullptr;
+     }
+ 
+-    auto eglDisplay = EglDisplay::create(eglGetPlatformDisplayEXT(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr), drmDevice.get());
++    auto eglDisplay = createSurfacelessEglDisplay(drmDevice.get());
+     if (!eglDisplay) {
+         return nullptr;
+     }
+@@ -101,6 +106,12 @@ static std::unique_ptr<RenderDevice> openRenderDevice()
+     return createRenderDevice(QStringLiteral("/dev/dri/renderD128"));
+ }
+ 
++static bool noDrmDeviceRequested()
++{
++    const QByteArray value = qgetenv("ANLAND_NO_DRM_DEVICE").trimmed().toLower();
++    return value == "1" || value == "true" || value == "yes" || value == "on";
++}
++
+ AnlandBackend::AnlandBackend(const QString &socketPath, QObject *parent)
+     : OutputBackend(parent)
+     , m_socketPath(socketPath.isEmpty() ? s_defaultSocketPath : socketPath)
+@@ -124,8 +135,8 @@ AnlandBackend::~AnlandBackend()
+         ::disconnect(m_display); // C producer API, not QObject::disconnect
+         m_display = nullptr;
+     }
+-    // m_renderDevice owns the EglDisplay; the 5.27-era manual
+-    // eglTerminate(sceneEglDisplay()) is no longer needed.
++    // m_renderDevice (or m_eglDisplay in no-DRM mode) owns the EglDisplay;
++    // the 5.27-era manual eglTerminate(sceneEglDisplay()) is no longer needed.
+ }
+ 
+ bool AnlandBackend::initialize()
+@@ -147,12 +158,22 @@ bool AnlandBackend::initialize()
+         return false;
+     }
+ 
+-    // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
+-    // setup; without a real device it segfaults. Open one up front.
+-    m_renderDevice = openRenderDevice();
+-    if (!m_renderDevice) {
+-        qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
+-        return false;
++    m_noDrmDeviceMode = noDrmDeviceRequested();
++    if (m_noDrmDeviceMode) {
++        qCWarning(KWIN_ANLAND) << "ANLAND_NO_DRM_DEVICE is enabled; using surfaceless EGL without a KWin DrmDevice";
++        m_eglDisplay = createSurfacelessEglDisplay(nullptr);
++        if (!m_eglDisplay) {
++            qCWarning(KWIN_ANLAND) << "could not create surfaceless EGL display";
++            return false;
++        }
++    } else {
++        // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
++        // setup; without a real device it segfaults. Open one up front.
++        m_renderDevice = openRenderDevice();
++        if (!m_renderDevice) {
++            qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
++            return false;
++        }
+     }
+ 
+     m_inputDevice = std::make_unique<AnlandInputDevice>();
+@@ -226,7 +247,7 @@ QList<BackendOutput *> AnlandBackend::outputs() const
+ 
+ EglDisplay *AnlandBackend::sceneEglDisplayObject() const
+ {
+-    return m_renderDevice ? m_renderDevice->eglDisplay() : nullptr;
++    return m_renderDevice ? m_renderDevice->eglDisplay() : m_eglDisplay.get();
+ }
+ 
+ bool AnlandBackend::notifyFramePresented()
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+index f78b2434d1..fd20c94fff 100644
+--- a/src/backends/anland/anland_backend.h
++++ b/src/backends/anland/anland_backend.h
+@@ -68,6 +68,10 @@ public:
+     {
+         return m_renderDevice ? m_renderDevice->drmDevice() : nullptr;
+     }
++    bool noDrmDeviceMode() const
++    {
++        return m_noDrmDeviceMode;
++    }
+     AnlandInputDevice *inputDevice() const
+     {
+         return m_inputDevice.get();
+@@ -111,6 +115,7 @@ private:
+     display_ctx *m_display = nullptr;
+ 
+     std::unique_ptr<RenderDevice> m_renderDevice;
++    std::unique_ptr<EglDisplay> m_eglDisplay;
+     QVector<AnlandOutput *> m_outputs;
+     std::unique_ptr<AnlandInputDevice> m_inputDevice;
+ 
+@@ -120,6 +125,7 @@ private:
+ 
+     bool m_consumerReady = false;
+     bool m_inFallback = false;
++    bool m_noDrmDeviceMode = false;
+ 
+     // Last known clipboard text — used to de-duplicate (KWin changed -> we sent ->
+     // consumer sets the same text on Android -> consumer sends back to KWin).
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index a29fca1649..f409a52793 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -258,9 +258,10 @@ bool AnlandEglBackend::initializeEgl()
+     if (!initClientExtensions()) {
+         return false;
+     }
+-    Q_ASSERT(m_backend->renderDevice());
+-    setRenderDevice(m_backend->renderDevice());
+-    return true;
++    if (m_backend->renderDevice()) {
++        setRenderDevice(m_backend->renderDevice());
++    }
++    return m_backend->sceneEglDisplayObject() != nullptr;
+ }
+ 
+ bool AnlandEglBackend::init()
+@@ -293,7 +294,12 @@ bool AnlandEglBackend::init()
+ 
+ bool AnlandEglBackend::initRenderingContext()
+ {
+-    return createContext() && openglContext()->makeCurrent();
++    if (m_backend->renderDevice()) {
++        return createContext() && openglContext()->makeCurrent();
++    }
++
++    m_context = EglContext::create(m_backend->sceneEglDisplayObject(), EGL_NO_CONFIG_KHR, nullptr);
++    return m_context && m_context->makeCurrent();
+ }
+ 
+ void AnlandEglBackend::addOutput(BackendOutput *output)
+diff --git a/src/compositor.cpp b/src/compositor.cpp
+index 3727cd5c63..d6ae70bb10 100644
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -153,10 +153,13 @@ static QVariantHash collectCrashInformation(const EglBackend *backend)
+     QVariantHash gpuInformation;
+     gpuInformation[QStringLiteral("api_type")] = QStringLiteral("OpenGL");
+     gpuInformation[QStringLiteral("name")] = QString::fromUtf8(glPlatform->glRendererString());
+-    if (backend->renderDevice()->drmDevice() && backend->renderDevice()->drmDevice()->pciDeviceInfo()) {
+-        const auto pciInfo = backend->renderDevice()->drmDevice()->pciDeviceInfo();
+-        gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
+-        gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++    if (RenderDevice *renderDevice = backend->renderDevice()) {
++        if (DrmDevice *drmDevice = renderDevice->drmDevice()) {
++            if (const auto pciInfo = drmDevice->pciDeviceInfo()) {
++                gpuInformation[QStringLiteral("id")] = QString::number(pciInfo->device_id, 16);
++                gpuInformation[QStringLiteral("vendor_id")] = QString::number(pciInfo->vendor_id, 16);
++            }
++        }
+     }
+     if (glPlatform->driverVersion().isValid()) {
+         gpuInformation[QStringLiteral("version")] = glPlatform->driverVersion().toString();
+diff --git a/src/opengl/eglbackend.cpp b/src/opengl/eglbackend.cpp
+index b029857fad..6cc50480de 100644
+--- a/src/opengl/eglbackend.cpp
++++ b/src/opengl/eglbackend.cpp
+@@ -147,6 +147,25 @@ void EglBackend::updateDmabufTranches()
+ 
+     m_tranches.clear();
+ 
++    if (!m_renderDevice) {
++        EglDisplay *display = eglDisplayObject();
++        if (!display) {
++            return;
++        }
++        const auto formats = display->nonExternalOnlySupportedDrmFormats();
++        if (!formats.isEmpty()) {
++            m_tranches.append({
++                .device = display->renderDevNode().value_or(0),
++                .flags = {},
++                .formatTable = formats,
++            });
++            LinuxDmaBufV1ClientBufferIntegration *dmabuf = waylandServer()->linuxDmabuf();
++            dmabuf->setRenderBackend(this);
++            dmabuf->setSupportedFormatsWithModifiers(m_tranches);
++        }
++        return;
++    }
++
+     // put the "main" device first, with EGL format+modifiers
+     m_tranches.append({
+         .device = m_renderDevice->deviceId(),
+@@ -239,6 +258,19 @@ QList<LinuxDmaBufV1Feedback::Tranche> EglBackend::tranches() const
+ 
+ bool EglBackend::testImportBuffer(GraphicsBuffer *buffer, dev_t targetDevice)
+ {
++    if (!m_renderDevice) {
++        EglDisplay *display = eglDisplayObject();
++        if (!display) {
++            return false;
++        }
++        const auto formats = display->nonExternalOnlySupportedDrmFormats();
++        const auto it = formats.constFind(buffer->dmabufAttributes()->format);
++        if (it == formats.cend() || !it->contains(buffer->dmabufAttributes()->modifier)) {
++            return false;
++        }
++        return display->importBufferAsImage(buffer) != EGL_NO_IMAGE_KHR;
++    }
++
+     RenderDevice *device = GpuManager::self()->compatibleRenderDevice(targetDevice);
+     if (!device) {
+         return false;
+@@ -259,12 +291,13 @@ bool EglBackend::testImportBuffer(GraphicsBuffer *buffer, dev_t targetDevice)
+ 
+ FormatModifierMap EglBackend::supportedFormats() const
+ {
+-    return m_renderDevice->eglDisplay()->nonExternalOnlySupportedDrmFormats();
++    EglDisplay *display = eglDisplayObject();
++    return display ? display->nonExternalOnlySupportedDrmFormats() : FormatModifierMap{};
+ }
+ 
+ EglDisplay *EglBackend::eglDisplayObject() const
+ {
+-    return m_renderDevice->eglDisplay();
++    return m_renderDevice ? m_renderDevice->eglDisplay() : (m_context ? m_context->displayObject() : nullptr);
+ }
+ 
+ EglContext *EglBackend::openglContext() const

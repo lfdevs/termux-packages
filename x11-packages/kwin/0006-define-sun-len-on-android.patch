@@ -1,0 +1,32 @@
+From 005993d0c4811dc53276aa490c2574d1ba704c28 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 6 Jul 2026 01:00:51 +0800
+Subject: [PATCH 06/21] helpers/wayland_wrapper: define SUN_LEN on Android
+
+---
+ src/helpers/wayland_wrapper/wl-socket.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/helpers/wayland_wrapper/wl-socket.c b/src/helpers/wayland_wrapper/wl-socket.c
+index 102d31d0c4..f34077b4e1 100644
+--- a/src/helpers/wayland_wrapper/wl-socket.c
++++ b/src/helpers/wayland_wrapper/wl-socket.c
+@@ -13,6 +13,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <stdio.h>
++#include <stddef.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/file.h>
+@@ -29,6 +30,10 @@
+ #define UNIX_PATH_MAX 108
+ #endif
+ 
++#ifndef SUN_LEN
++#define SUN_LEN(ptr) (offsetof(struct sockaddr_un, sun_path) + strlen((ptr)->sun_path))
++#endif
++
+ #define LOCK_SUFFIX ".lock"
+ #define LOCK_SUFFIXLEN 5
+ 

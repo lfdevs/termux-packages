@@ -1,0 +1,26 @@
+From a711a67e8247ee458e1a14bec492bff429d57976 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Thu, 23 Jul 2026 00:50:31 +0800
+Subject: [PATCH 08/21] screencast: fall back to memfd without a DRM device
+
+Skip DMA-BUF allocation when the Anland stream has no render device so that
+PipeWire can continue with its existing memfd path.
+---
+ src/plugins/screencast/screencaststream.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/plugins/screencast/screencaststream.cpp b/src/plugins/screencast/screencaststream.cpp
+index 10f74210a5..5951930e7f 100644
+--- a/src/plugins/screencast/screencaststream.cpp
++++ b/src/plugins/screencast/screencaststream.cpp
+@@ -897,6 +897,10 @@ void ScreenCastStream::setCursorMode(ScreencastV1Interface::CursorMode mode)
+ 
+ std::optional<ScreenCastDmaBufTextureParams> ScreenCastStream::testCreateDmaBuf(RenderDevice *device, const QSize &size, quint32 format, const ModifierList &modifiers)
+ {
++    if (!device) {
++        return std::nullopt;
++    }
++
+     GraphicsBuffer *buffer = device->allocator()->allocate(GraphicsBufferOptions{
+         .size = size,
+         .format = format,
