@@ -1,0 +1,313 @@
+From 95ff7aee907cfb126fdfc735ca4180fc7dfcfe38 Mon Sep 17 00:00:00 2001
+From: Goldzxcbug <Zxc20060226@outlook.com>
+Date: Mon, 12 Oct 2026 22:12:11 +0800
+Subject: [PATCH 18/21] backends/anland: fix audio socket lifetime during
+ fallback
+
+Keep an owned CLOEXEC duplicate of the consumer audio socket and detach it through a dedicated PipeWire-loop helper. This prevents descriptor reuse from racing with PipeWire callbacks during fallback while keeping the audio streams alive.
+
+Register a pre-release callback so the audio source is removed before display resources close, and use close-on-exec flags for received transport descriptors.
+
+(cherry picked from commit 96a11f040033048227362fc0eca57f51994bdc0f)
+
+Co-authored-by: lfdevs <lfdevs@lfdevs.com>
+---
+ src/backends/anland/anland_audio.c     | 69 +++++++++++++++-----------
+ src/backends/anland/anland_audio.h     |  2 +-
+ src/backends/anland/anland_backend.cpp | 11 ++--
+ src/backends/anland/display_producer.c | 22 +++++---
+ src/backends/anland/display_producer.h |  6 ++-
+ src/backends/anland/socket_utils.c     |  5 +-
+ 6 files changed, 71 insertions(+), 44 deletions(-)
+
+diff --git a/src/backends/anland/anland_audio.c b/src/backends/anland/anland_audio.c
+index fb6a5d08af..ad4e7cb709 100644
+--- a/src/backends/anland/anland_audio.c
++++ b/src/backends/anland/anland_audio.c
+@@ -3,6 +3,7 @@
+ #include "protocol.h"
+ 
+ #include <errno.h>
++#include <fcntl.h>
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stdio.h>
+@@ -50,7 +51,7 @@ struct anland_audio {
+      * 0 = let PipeWire choose the graph quantum. Applied as node.latency. */
+     uint32_t               play_quantum, cap_quantum;
+ 
+-    int                    audio_fd;  /* borrowed; -1 when detached */
++    int                    audio_fd;  /* owned duplicate; -1 when detached */
+     struct spa_source     *io;        /* loop io source watching audio_fd for reads */
+ 
+     /* Mic ring buffer. Only ever touched from the loop thread (the io read callback
+@@ -109,6 +110,18 @@ static size_t ring_read(struct anland_audio *a, uint8_t *p, size_t n)
+     return got;
+ }
+ 
++/* The caller holds the thread-loop lock, or is executing on that loop. The io
++ * source owns audio_fd, so destroying it also closes the duplicated descriptor. */
++static void detach_audio_fd_locked(struct anland_audio *a)
++{
++    struct spa_source *io = a->io;
++    a->io = NULL;
++    a->audio_fd = -1;
++    ring_reset(a);
++    if (io)
++        pw_loop_destroy_source(pw_thread_loop_get_loop(a->loop), io);
++}
++
+ /* ---- stream process callbacks (run on the loop thread, RT context) ---- */
+ 
+ /* Desktop audio captured from the default sink's monitor -> push to the socket so
+@@ -232,6 +245,8 @@ static void apply_format(struct anland_audio *a, const struct audio_format *f)
+ static void on_audio_readable(void *data, int fd, uint32_t mask)
+ {
+     struct anland_audio *a = data;
++    if (fd != a->audio_fd)
++        return;
+     if (mask & (SPA_IO_ERR | SPA_IO_HUP)) {
+         /* The consumer's audio socket went away (peer closed or errored). Drop the
+          * io source immediately: if it stays registered the loop polls a dead fd,
+@@ -240,13 +255,7 @@ static void on_audio_readable(void *data, int fd, uint32_t mask)
+          * the ring is discarded, and the next consumer reconnect re-attaches a
+          * fresh socket. The pw_streams keep running (capture drops PCM, the mic
+          * source feeds silence) so PipeWire never sees the device disappear. */
+-        struct pw_loop *loop = pw_thread_loop_get_loop(a->loop);
+-        if (a->io) {
+-            pw_loop_destroy_source(loop, a->io);
+-            a->io = NULL;
+-        }
+-        a->audio_fd = -1;
+-        ring_reset(a);
++        detach_audio_fd_locked(a);
+         return;
+     }
+     if (!(mask & SPA_IO_IN))
+@@ -257,17 +266,16 @@ static void on_audio_readable(void *data, int fd, uint32_t mask)
+         if (n == 0) {
+             /* Peer did an orderly shutdown: recv()==0 forever. Same busy-loop
+              * hazard as HUP above, so tear the io source down the same way. */
+-            struct pw_loop *loop = pw_thread_loop_get_loop(a->loop);
+-            if (a->io) {
+-                pw_loop_destroy_source(loop, a->io);
+-                a->io = NULL;
+-            }
+-            a->audio_fd = -1;
+-            ring_reset(a);
++            detach_audio_fd_locked(a);
+             break;
+         }
+-        if (n < 0)
++        if (n < 0) {
++            if (errno == EINTR)
++                continue;
++            if (errno != EAGAIN && errno != EWOULDBLOCK)
++                detach_audio_fd_locked(a);
+             break;
++        }
+         if ((size_t)n < sizeof(struct audio_msg))
+             continue;
+         struct audio_msg h;
+@@ -362,8 +370,7 @@ static int connect_stream(struct pw_stream *stream, enum spa_direction direction
+     const struct spa_pod *params[1] = { build_format(&bld, rate, channels) };
+ 
+     return pw_stream_connect(stream, direction, PW_ID_ANY,
+-                             PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS |
+-                                 PW_STREAM_FLAG_RT_PROCESS,
++                             PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS,
+                              params, 1);
+ }
+ 
+@@ -463,20 +470,24 @@ void anland_audio_set_fd(int audio_fd)
+ 
+     pw_thread_loop_lock(a->loop);
+ 
+-    struct pw_loop *loop = pw_thread_loop_get_loop(a->loop);
+-    if (a->io) {
+-        pw_loop_destroy_source(loop, a->io);
+-        a->io = NULL;
+-    }
+-    a->audio_fd = audio_fd;
+-    ring_reset(a);   /* drop stale mic audio across a reconnect */
++    detach_audio_fd_locked(a);
+ 
+     if (audio_fd >= 0) {
+-        /* close=false: the fd is borrowed from display_producer, never closed here.
+-         * The consumer announces both device formats (AUDIO_MSG_FORMAT) right after
++        /* display_producer retains the input fd. Keep an owned duplicate so source
++         * teardown cannot race with producer fd reuse during fallback. The consumer
++         * announces both device formats (AUDIO_MSG_FORMAT) right after
+          * this socket comes up; on_audio_readable applies them and reconfigures the
+          * PipeWire streams, so we don't dictate any format here. */
+-        a->io = pw_loop_add_io(loop, audio_fd, SPA_IO_IN, false, on_audio_readable, a);
++        int owned_fd = fcntl(audio_fd, F_DUPFD_CLOEXEC, 3);
++        if (owned_fd >= 0) {
++            a->io = pw_loop_add_io(pw_thread_loop_get_loop(a->loop), owned_fd,
++                                   SPA_IO_IN, true, on_audio_readable, a);
++            if (a->io) {
++                a->audio_fd = owned_fd;
++            } else {
++                close(owned_fd);
++            }
++        }
+     }
+ 
+     pw_thread_loop_unlock(a->loop);
+@@ -555,7 +566,7 @@ void anland_audio_stop(void)
+         pw_thread_loop_stop(a->loop);
+     teardown_pw(a);
+     if (a->io)
+-        pw_loop_destroy_source(pw_thread_loop_get_loop(a->loop), a->io);
++        detach_audio_fd_locked(a);
+     if (a->reconnect_timer)
+         pw_loop_destroy_source(pw_thread_loop_get_loop(a->loop), a->reconnect_timer);
+     if (a->context)
+diff --git a/src/backends/anland/anland_audio.h b/src/backends/anland/anland_audio.h
+index 5acf1f1aa8..4fda506484 100644
+--- a/src/backends/anland/anland_audio.h
++++ b/src/backends/anland/anland_audio.h
+@@ -16,7 +16,7 @@
+  * stream simply drops its PCM and the source feeds silence, so PipeWire (and every
+  * recording app) never sees the device disappear. Only the socket fd is hot-swapped:
+  * anland_audio_set_fd(fd) on (re)connect, anland_audio_set_fd(-1) on fallback. The fd
+- * is borrowed -- the engine never closes it (display_producer owns its lifetime).
++ * is borrowed from display_producer; the engine owns a CLOEXEC duplicate while attached.
+  */
+ 
+ #ifdef __cplusplus
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 7cefaba642..fc4c605365 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -106,6 +106,11 @@ static std::unique_ptr<RenderDevice> openRenderDevice()
+     return createRenderDevice(QStringLiteral("/dev/dri/renderD128"));
+ }
+ 
++static void detachAudioBeforeConsumerRelease(void *)
++{
++    anland_audio_set_fd(-1);
++}
++
+ static bool noDrmDeviceRequested()
+ {
+     const QByteArray value = qgetenv("ANLAND_NO_DRM_DEVICE").trimmed().toLower();
+@@ -146,6 +151,7 @@ bool AnlandBackend::initialize()
+         return false;
+     }
+ 
++    set_pre_release_callback(m_display, detachAudioBeforeConsumerRelease, nullptr);
+     set_fallback_callback(m_display, &AnlandBackend::fallbackTrampoline, this);
+ 
+     uint32_t w = 0, h = 0, fmt = 0, refresh = 0;
+@@ -483,11 +489,6 @@ void AnlandBackend::enterFallback()
+     m_consumerReady = false;
+     m_inFallback = true;
+ 
+-    // Detach the audio socket before the transport closes the borrowed fd. The streams
+-    // keep running (capture drops its PCM, the mic Source feeds silence), so PipeWire
+-    // never perceives the disconnect.
+-    anland_audio_set_fd(-1);
+-
+     // The consumer's camera fds are now dead: stop recording, destroy the virtual
+     // camera nodes and close the fds. New ones arrive on the next reconnect.
+     anland_camera_clear();
+diff --git a/src/backends/anland/display_producer.c b/src/backends/anland/display_producer.c
+index 8d0e896560..aaf7470f54 100644
+--- a/src/backends/anland/display_producer.c
++++ b/src/backends/anland/display_producer.c
+@@ -33,6 +33,8 @@ struct display_ctx {
+     struct buf_info dmabuf_infos[MAX_BUFS];
+     int      buf_count;
+ 
++    void (*pre_release_cb)(void *);
++    void  *pre_release_userdata;
+     void (*fallback_cb)(void *);
+     void  *fallback_userdata;
+ };
+@@ -67,19 +69,19 @@ static void enter_fallback(display_ctx *ctx)
+         return;
+     ctx->fallback = true;
+ 
+-    /* Let the backend detach users of borrowed fds (notably PipeWire's audio
+-     * loop source) before those fds are closed below. Destroying a loop source
+-     * after its fd has already been closed can leave a stale dispatch entry. */
+-    if (ctx->fallback_cb)
+-        ctx->fallback_cb(ctx->fallback_userdata);
++    if (ctx->pre_release_cb)
++        ctx->pre_release_cb(ctx->pre_release_userdata);
+ 
+     release_consumer_resources(ctx);
++
++    if (ctx->fallback_cb)
++        ctx->fallback_cb(ctx->fallback_userdata);
+ }
+ 
+ /*
+  * Ask the daemon for the consumer-side fds and map the shm index. Polls ctrl_fd
+  * with a short timeout so it returns promptly when no consumer is up yet. On
+- * success the four fds and shm_ptr are installed on ctx; the caller releases them
++ * success the five fds and shm_ptr are installed on ctx; the caller releases them
+  * via release_consumer_resources() on any later failure. Returns 0 / -1.
+  */
+ static int pickup_fds(display_ctx *ctx)
+@@ -434,6 +436,14 @@ int poll_input_event_extend_data(display_ctx *ctx, void* payload, size_t size, i
+         return -1;
+     return 1;
+ }
++
++int set_pre_release_callback(display_ctx *ctx, void (*on_pre_release)(void *), void *userdata)
++{
++    ctx->pre_release_cb = on_pre_release;
++    ctx->pre_release_userdata = userdata;
++    return 0;
++}
++
+ int set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata)
+ {
+     ctx->fallback_cb = on_fallback;
+diff --git a/src/backends/anland/display_producer.h b/src/backends/anland/display_producer.h
+index 53a5cdd3bf..9a72e05000 100644
+--- a/src/backends/anland/display_producer.h
++++ b/src/backends/anland/display_producer.h
+@@ -64,8 +64,12 @@ int push_output_event(display_ctx *ctx, const struct OutputEvent *event);
+ //变长事件不得使用push_output_event发送，必须使用push_output_event_with_length发送
+ //接收端使用标准事件接收后根据size字段知道后续数据的大小，务必使用socket手动接收变长数据（必须有超时，避免对端挂掉）
+ int push_output_event_with_length(display_ctx *ctx, const struct OutputEvent *event, void* payload, size_t size);
++/* Register a callback invoked after fallback is set but before consumer-owned fds
++ * are closed. It must not re-enter display_producer. */
++int  set_pre_release_callback(display_ctx *ctx, void (*on_pre_release)(void *), void *userdata);
++
+ /* Register a callback invoked when the consumer is lost and the context drops
+- * back to fallback. */
++ * back to fallback, after its consumer-owned resources are released. */
+ int  set_fallback_callback(display_ctx *ctx, void (*on_fallback)(void *), void *userdata);
+ 
+ bool is_fallback(display_ctx *ctx);
+diff --git a/src/backends/anland/socket_utils.c b/src/backends/anland/socket_utils.c
+index 1b4ef31df3..e469306aa6 100644
+--- a/src/backends/anland/socket_utils.c
++++ b/src/backends/anland/socket_utils.c
+@@ -1,3 +1,4 @@
++#define _GNU_SOURCE
+ #include "socket_utils.h"
+ 
+ #include <errno.h>
+@@ -53,7 +54,7 @@ int recv_fds(int sock, void *data, size_t data_len,
+         .msg_controllen = sizeof(cmsg_buf),
+     };
+ 
+-    ssize_t n = recvmsg(sock, &msg, 0);
++    ssize_t n = recvmsg(sock, &msg, MSG_CMSG_CLOEXEC);
+     if (n <= 0)
+         return -1;
+ 
+@@ -72,7 +73,7 @@ int recv_fds(int sock, void *data, size_t data_len,
+ 
+ int connect_unix(const char *path)
+ {
+-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+     if (fd < 0)
+         return -1;
+ 

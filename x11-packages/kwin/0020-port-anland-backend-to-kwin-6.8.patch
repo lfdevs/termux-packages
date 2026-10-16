@@ -1,0 +1,483 @@
+From f2604533e9ab4d9d716968f5d9037dd28ed68dc1 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Fri, 16 Oct 2026 21:15:23 +0800
+Subject: [PATCH 20/21] Port the Anland backend to KWin 6.8 APIs and register
+ its render device.
+
+---
+ src/backends/anland/anland_backend.cpp     | 35 +++++++++++++-------
+ src/backends/anland/anland_backend.h       |  9 +++---
+ src/backends/anland/anland_egl_backend.cpp | 37 ++++++----------------
+ src/backends/anland/anland_egl_backend.h   | 10 ++----
+ src/backends/anland/anland_input.cpp       |  2 +-
+ src/backends/anland/anland_output.cpp      | 32 ++++++++-----------
+ src/backends/anland/anland_output.h        |  8 ++---
+ src/backends/anland/display_producer.c     |  2 +-
+ src/backends/anland/display_producer.h     |  2 +-
+ src/compositor.cpp                         |  5 +++
+ 10 files changed, 64 insertions(+), 78 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index fc4c605365..ecdf09ad5a 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -13,8 +13,10 @@
+ #include "anland_output.h"
+ 
+ #include "core/drmdevice.h"
++#include "core/gpumanager.h"
+ #include "core/renderdevice.h"
+ #include "core/renderloop.h"
++#include "core/udmabufallocator.h"
+ #include "inputmethod.h"
+ #include "main.h"
+ #include "opengl/egldisplay.h"
+@@ -136,12 +138,15 @@ AnlandBackend::~AnlandBackend()
+     // m_outputs are QObject children of this backend; ~QObject deletes them.
+     m_outputs.clear();
+     m_inputDevice.reset();
++    if (m_renderDevice && GpuManager::self()) {
++        GpuManager::self()->removeDevice(m_renderDevice);
++        m_renderDevice = nullptr;
++    }
+     if (m_display) {
+         ::disconnect(m_display); // C producer API, not QObject::disconnect
+         m_display = nullptr;
+     }
+-    // m_renderDevice (or m_eglDisplay in no-DRM mode) owns the EglDisplay;
+-    // the 5.27-era manual eglTerminate(sceneEglDisplay()) is no longer needed.
++    // GpuManager owns the render device and its EglDisplay.
+ }
+ 
+ bool AnlandBackend::initialize()
+@@ -166,20 +171,25 @@ bool AnlandBackend::initialize()
+ 
+     m_noDrmDeviceMode = noDrmDeviceRequested();
+     if (m_noDrmDeviceMode) {
+-        qCWarning(KWIN_ANLAND) << "ANLAND_NO_DRM_DEVICE is enabled; using surfaceless EGL without a KWin DrmDevice";
+-        m_eglDisplay = createSurfacelessEglDisplay(nullptr);
+-        if (!m_eglDisplay) {
++        qCWarning(KWIN_ANLAND) << "ANLAND_NO_DRM_DEVICE is enabled; using surfaceless EGL without a DRM device";
++        auto eglDisplay = createSurfacelessEglDisplay(nullptr);
++        if (!eglDisplay) {
+             qCWarning(KWIN_ANLAND) << "could not create surfaceless EGL display";
+             return false;
+         }
++        auto renderDevice = std::make_unique<RenderDevice>(
++            std::make_unique<UDmabufAllocator>(), std::move(eglDisplay), dev_t{0});
++        m_renderDevice = renderDevice.get();
++        GpuManager::self()->addDevice(std::move(renderDevice));
+     } else {
+-        // KWin dereferences renderBackend->drmDevice() during OpenGL compositor
+-        // setup; without a real device it segfaults. Open one up front.
+-        m_renderDevice = openRenderDevice();
+-        if (!m_renderDevice) {
++        // Open and register the render device before KWin selects the primary GPU.
++        auto renderDevice = openRenderDevice();
++        if (!renderDevice) {
+             qCWarning(KWIN_ANLAND) << "no usable DRM render device; cannot bring up OpenGL compositing";
+             return false;
+         }
++        m_renderDevice = renderDevice.get();
++        GpuManager::self()->addDevice(std::move(renderDevice));
+     }
+ 
+     m_inputDevice = std::make_unique<AnlandInputDevice>();
+@@ -226,9 +236,10 @@ bool AnlandBackend::initialize()
+     return true;
+ }
+ 
+-std::unique_ptr<EglBackend> AnlandBackend::createOpenGLBackend()
++std::unique_ptr<EglBackend> AnlandBackend::createOpenGLBackend(RenderDevice *device)
+ {
+-    return std::make_unique<AnlandEglBackend>(this);
++    Q_ASSERT(device == m_renderDevice);
++    return std::make_unique<AnlandEglBackend>(this, device);
+ }
+ 
+ std::unique_ptr<InputBackend> AnlandBackend::createInputBackend()
+@@ -253,7 +264,7 @@ QList<BackendOutput *> AnlandBackend::outputs() const
+ 
+ EglDisplay *AnlandBackend::sceneEglDisplayObject() const
+ {
+-    return m_renderDevice ? m_renderDevice->eglDisplay() : m_eglDisplay.get();
++    return m_renderDevice ? m_renderDevice->eglDisplay() : nullptr;
+ }
+ 
+ bool AnlandBackend::notifyFramePresented()
+diff --git a/src/backends/anland/anland_backend.h b/src/backends/anland/anland_backend.h
+index fd20c94fff..0265456206 100644
+--- a/src/backends/anland/anland_backend.h
++++ b/src/backends/anland/anland_backend.h
+@@ -49,15 +49,15 @@ public:
+ 
+     bool initialize() override;
+ 
+-    std::unique_ptr<EglBackend> createOpenGLBackend() override;
++    std::unique_ptr<EglBackend> createOpenGLBackend(RenderDevice *device) override;
+     std::unique_ptr<InputBackend> createInputBackend() override;
+     QList<CompositingType> supportedCompositors() const override;
+     QList<BackendOutput *> outputs() const override;
+ 
+-    EglDisplay *sceneEglDisplayObject() const override;
++    EglDisplay *sceneEglDisplayObject() const;
+     RenderDevice *renderDevice() const
+     {
+-        return m_renderDevice.get();
++        return m_renderDevice;
+     }
+ 
+     display_ctx *display() const
+@@ -114,8 +114,7 @@ private:
+     QString m_socketPath;
+     display_ctx *m_display = nullptr;
+ 
+-    std::unique_ptr<RenderDevice> m_renderDevice;
+-    std::unique_ptr<EglDisplay> m_eglDisplay;
++    RenderDevice *m_renderDevice = nullptr;
+     QVector<AnlandOutput *> m_outputs;
+     std::unique_ptr<AnlandInputDevice> m_inputDevice;
+ 
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index fc52a77943..a6df781dd9 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -147,10 +147,10 @@ bool AnlandEglLayer::importBuffers(int count)
+         attrs.offset[0] = static_cast<int>(info.offset);
+         attrs.pitch[0] = static_cast<int>(info.stride);
+ 
+-        // EglBackend::importDmaBufAsTexture() builds the EGLImage and wraps it in
++        // EglContext::importDmaBufAsTexture() builds the EGLImage and wraps it in
+         // a GLTexture in one step (the 5.27-era manual EGLImageKHR +
+         // EGLImageTexture(...) dance is gone in 6.x).
+-        std::shared_ptr<GLTexture> texture = m_backend->importDmaBufAsTexture(attrs);
++        std::shared_ptr<GLTexture> texture = m_backend->openglContext()->importDmaBufAsTexture(attrs);
+         if (!texture) {
+             qCWarning(KWIN_ANLAND) << "failed to import dmabuf" << i << "as texture";
+             releaseBuffers();
+@@ -188,7 +188,7 @@ void AnlandEglLayer::onOutputTransformChanged()
+     for (int i = 0; i < m_bufCount; i++) {
+         m_textures[i]->setContentTransform(contentTransform);
+         // The cached RenderTarget captured the old transform; rebuild it so the
+-        // renderer picks up the new content transform on the next doBeginFrame.
++        // renderer picks up the new content transform on the next beginFrame.
+         m_renderTargets[i].emplace(m_fbos[i].get());
+         m_accumDamage[i] = Region::infinite();
+     }
+@@ -196,7 +196,7 @@ void AnlandEglLayer::onOutputTransformChanged()
+     scheduleRepaint(nullptr);
+ }
+ 
+-std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
++std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::beginFrame(OutputFrame *frame)
+ {
+     if (!m_backend->openglContext()->makeCurrent()) {
+         return std::nullopt;
+@@ -221,7 +221,7 @@ std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
+     };
+ }
+ 
+-bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
++bool AnlandEglLayer::endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame)
+ {
+     glFlush(); // flush pending rendering commands into the dmabuf.
+     for (int i = 0; i < m_bufCount; i++)
+@@ -253,18 +253,14 @@ bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region
+     return true;
+ }
+ 
+-DrmDevice *AnlandEglLayer::scanoutDevice() const
+-{
+-    return m_backend->drmDevice();
+-}
+-
+ FormatModifierMap AnlandEglLayer::supportedDrmFormats() const
+ {
+     return {};
+ }
+ 
+-AnlandEglBackend::AnlandEglBackend(AnlandBackend *b)
+-    : m_backend(b)
++AnlandEglBackend::AnlandEglBackend(AnlandBackend *b, RenderDevice *device)
++    : EglBackend(device)
++    , m_backend(b)
+ {
+ }
+ 
+@@ -279,20 +275,12 @@ display_ctx *AnlandEglBackend::display() const
+     return m_backend->display();
+ }
+ 
+-DrmDevice *AnlandEglBackend::drmDevice() const
+-{
+-    return m_backend->drmDevice();
+-}
+-
+ bool AnlandEglBackend::initializeEgl()
+ {
+     if (!initClientExtensions()) {
+         return false;
+     }
+-    if (m_backend->renderDevice()) {
+-        setRenderDevice(m_backend->renderDevice());
+-    }
+-    return m_backend->sceneEglDisplayObject() != nullptr;
++    return renderDevice() && m_backend->sceneEglDisplayObject() == renderDevice()->eglDisplay();
+ }
+ 
+ bool AnlandEglBackend::init()
+@@ -325,12 +313,7 @@ bool AnlandEglBackend::init()
+ 
+ bool AnlandEglBackend::initRenderingContext()
+ {
+-    if (m_backend->renderDevice()) {
+-        return createContext() && openglContext()->makeCurrent();
+-    }
+-
+-    m_context = EglContext::create(m_backend->sceneEglDisplayObject(), EGL_NO_CONFIG_KHR, nullptr);
+-    return m_context && m_context->makeCurrent();
++    return createContext() && openglContext()->makeCurrent();
+ }
+ 
+ void AnlandEglBackend::addOutput(BackendOutput *output)
+diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
+index 9bb6678a06..de12d5cf58 100644
+--- a/src/backends/anland/anland_egl_backend.h
++++ b/src/backends/anland/anland_egl_backend.h
+@@ -33,7 +33,6 @@ namespace KWin
+ class GLFramebuffer;
+ class GLTexture;
+ class BackendOutput;
+-class DrmDevice;
+ class OutputFrame;
+ class AnlandBackend;
+ class AnlandEglBackend;
+@@ -45,9 +44,8 @@ public:
+     AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend);
+     ~AnlandEglLayer() override;
+ 
+-    std::optional<OutputLayerBeginFrameInfo> doBeginFrame() override;
+-    bool doEndFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
+-    DrmDevice *scanoutDevice() const override;
++    std::optional<OutputLayerBeginFrameInfo> beginFrame(OutputFrame *frame) override;
++    bool endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
+     FormatModifierMap supportedDrmFormats() const override;
+     bool importBuffers(int count);
+     void releaseBuffers() override;
+@@ -75,13 +73,11 @@ class AnlandEglBackend : public EglBackend
+     Q_OBJECT
+ 
+ public:
+-    AnlandEglBackend(AnlandBackend *b);
++    AnlandEglBackend(AnlandBackend *b, RenderDevice *device);
+     ~AnlandEglBackend() override;
+ 
+     bool init() override;
+     QList<OutputLayer *> compatibleOutputLayers(BackendOutput *output) override;
+-    DrmDevice *drmDevice() const override;
+-
+     AnlandBackend *backend() const
+     {
+         return m_backend;
+diff --git a/src/backends/anland/anland_input.cpp b/src/backends/anland/anland_input.cpp
+index b2bb835f6f..3941d7e6ef 100644
+--- a/src/backends/anland/anland_input.cpp
++++ b/src/backends/anland/anland_input.cpp
+@@ -119,7 +119,7 @@ void AnlandInputDevice::pointerAxis(PointerAxis axis, qreal delta, qint32 deltaV
+         deltaV120 != 0 ? PointerAxisSource::Wheel : PointerAxisSource::Continuous;
+     // 6.x pointerAxisChanged carries an explicit "inverted" (natural scroll) flag;
+     // the daemon already delivers deltas in KWin's direction, so it is never set.
+-    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, now(), this);
++    Q_EMIT pointerAxisChanged(axis, delta, deltaV120, source, false, false, now(), this);
+     Q_EMIT InputDevice::pointerFrame(this);
+ }
+ 
+diff --git a/src/backends/anland/anland_output.cpp b/src/backends/anland/anland_output.cpp
+index 112036557e..ab419b1906 100644
+--- a/src/backends/anland/anland_output.cpp
++++ b/src/backends/anland/anland_output.cpp
+@@ -17,9 +17,8 @@ namespace KWin
+ {
+ 
+ AnlandOutput::AnlandOutput(AnlandBackend *parent, const QString &name)
+-    : BackendOutput()
++    : BackendOutput(parent->drmDevice())
+     , m_backend(parent)
+-    , m_renderLoop(std::make_unique<RenderLoop>(this))
+ {
+     setInformation(Information{
+         .name = name,
+@@ -33,20 +32,15 @@ AnlandOutput::~AnlandOutput()
+ {
+ }
+ 
+-RenderLoop *AnlandOutput::renderLoop() const
++std::expected<void, OutputError> AnlandOutput::testPresentation(const std::shared_ptr<OutputFrame> &frame)
+ {
+-    return m_renderLoop.get();
++    return {};
+ }
+ 
+-bool AnlandOutput::testPresentation(const std::shared_ptr<OutputFrame> &frame)
+-{
+-    return true;
+-}
+-
+-bool AnlandOutput::present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame)
++std::expected<void, OutputError> AnlandOutput::present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame)
+ {
+     // The scene has already been rendered into the daemon's dmabuf by the layer
+-    // (AnlandEglLayer::doEndFrame). Hand it to the consumer now.
++    // (AnlandEglLayer::endFrame). Hand it to the consumer now.
+     m_frame = frame;
+     const bool handedToConsumer = m_backend->notifyFramePresented();
+     if (handedToConsumer) {
+@@ -58,7 +52,7 @@ bool AnlandOutput::present(const QList<OutputLayer *> &layersToUpdate, const std
+         // arrive for it — complete it now so the RenderLoop never stalls.
+         completeFrame();
+     }
+-    return true;
++    return {};
+ }
+ 
+ void AnlandOutput::init(const QSize &pixelSize, int refresh, qreal scale)
+@@ -67,7 +61,7 @@ void AnlandOutput::init(const QSize &pixelSize, int refresh, qreal scale)
+     if (refresh <= 0) {
+         refresh = 120000;
+     }
+-    m_renderLoop->setRefreshRate(refresh);
++    renderLoop()->setRefreshRate(refresh);
+ 
+     auto mode = std::make_shared<OutputMode>(OutputModeline(pixelSize, refresh, OutputModeline::Flag::Preferred));
+ 
+@@ -90,10 +84,10 @@ void AnlandOutput::setRefreshRate(int refresh)
+ {
+     // refresh is in mHz. Ignore noise and no-op changes; RenderLoop::setRefreshRate
+     // already guards the latter, but we also skip rebuilding the mode below.
+-    if (refresh <= 0 || refresh == m_renderLoop->refreshRate()) {
++    if (refresh <= 0 || refresh == renderLoop()->refreshRate()) {
+         return;
+     }
+-    m_renderLoop->setRefreshRate(refresh);
++    renderLoop()->setRefreshRate(refresh);
+ 
+     // Keep the OutputMode in lockstep with the RenderLoop, mirroring init(), so
+     // currentMode()->refreshRate() and any mode-based logic see the new rate.
+@@ -122,7 +116,7 @@ void AnlandOutput::onConsumerReady()
+     }
+     // Render the next frame in lockstep with the consumer, exactly as the 5.27
+     // backend did: the consumer's buffer-ready drives scheduleRepaint().
+-    m_renderLoop->scheduleRepaint();
++    renderLoop()->scheduleRepaint();
+ }
+ 
+ void AnlandOutput::resize(const QSize &newSize)
+@@ -134,7 +128,7 @@ void AnlandOutput::resize(const QSize &newSize)
+ 
+     // Keep the same refresh rate; update both the OutputMode and the RenderLoop
+     // pacing. Mirroring setRefreshRate() / init().
+-    const int refresh = m_renderLoop->refreshRate();
++    const int refresh = renderLoop()->refreshRate();
+     auto mode = std::make_shared<OutputMode>(OutputModeline(newSize, refresh, OutputModeline::Flag::Preferred));
+     State next = m_state;
+     next.modes = {mode};
+@@ -174,7 +168,7 @@ void AnlandOutput::stopRendering()
+     }
+ 
+     if (!m_renderingInhibited) {
+-        m_renderLoop->inhibit();
++        renderLoop()->inhibit();
+         m_renderingInhibited = true;
+     }
+ }
+@@ -182,7 +176,7 @@ void AnlandOutput::stopRendering()
+ void AnlandOutput::resumeRendering()
+ {
+     if (m_renderingInhibited) {
+-        m_renderLoop->uninhibit();
++        renderLoop()->uninhibit();
+         m_renderingInhibited = false;
+     }
+ }
+diff --git a/src/backends/anland/anland_output.h b/src/backends/anland/anland_output.h
+index f99687c40b..429f27248b 100644
+--- a/src/backends/anland/anland_output.h
++++ b/src/backends/anland/anland_output.h
+@@ -35,9 +35,8 @@ public:
+     AnlandOutput(AnlandBackend *parent, const QString &name);
+     ~AnlandOutput() override;
+ 
+-    RenderLoop *renderLoop() const override;
+-    bool testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
+-    bool present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
++    std::expected<void, OutputError> testPresentation(const std::shared_ptr<OutputFrame> &frame) override;
++    std::expected<void, OutputError> present(const QList<OutputLayer *> &layersToUpdate, const std::shared_ptr<OutputFrame> &frame) override;
+ 
+     /** @p pixelSize and @p refresh (in mHz) come from the display daemon. */
+     void init(const QSize &pixelSize, int refresh, qreal scale);
+@@ -57,7 +56,7 @@ public:
+      *  (e.g. screen rotation / resolution switch). Updates the OutputMode and asks
+      *  the backend to emit outputsQueried() so the Workspace re-lays-out windows
+      *  for the new size — currentModeChanged() alone does not trigger a relayout. */
+-    void resize(const QSize &newSize);
++    void resize(const QSize &newSize) override;
+ 
+     /** Consumer went away (fallback): fail any in-flight frame and inhibit() the
+      *  RenderLoop so the compositor stops trying to render into dmabufs that no
+@@ -80,7 +79,6 @@ private:
+     Q_DISABLE_COPY(AnlandOutput);
+ 
+     AnlandBackend *m_backend;
+-    std::unique_ptr<RenderLoop> m_renderLoop;
+     std::shared_ptr<OutputFrame> m_frame;
+     AnlandEglLayer *m_eglLayer = nullptr;
+     bool m_awaitingPresent = false;
+diff --git a/src/backends/anland/display_producer.c b/src/backends/anland/display_producer.c
+index aaf7470f54..e45a553a1d 100644
+--- a/src/backends/anland/display_producer.c
++++ b/src/backends/anland/display_producer.c
+@@ -247,7 +247,7 @@ int get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_
+     return 0;
+ }
+ 
+-/* Stash the render-done fence for the in-flight frame (created in doEndFrame).
++/* Stash the render-done fence for the in-flight frame (created in endFrame).
+  * trigger_refresh sends it to the consumer. Closes any previous unconsumed stash. */
+ void set_render_fence(display_ctx *ctx, int fence_fd)
+ {
+diff --git a/src/backends/anland/display_producer.h b/src/backends/anland/display_producer.h
+index 9a72e05000..48b07d0e7d 100644
+--- a/src/backends/anland/display_producer.h
++++ b/src/backends/anland/display_producer.h
+@@ -28,7 +28,7 @@ void disconnect(display_ctx *ctx);
+ 
+ int  get_screen_info(display_ctx *ctx, uint32_t *width, uint32_t *height, uint32_t *format, uint32_t *refresh);
+ 
+-/* Stash the render-done fence (created in doEndFrame) for the current frame. The
++/* Stash the render-done fence (created in endFrame) for the current frame. The
+  * next trigger_refresh hands it to the consumer on the dedicated fence channel, so
+  * SurfaceFlinger waits on it GPU-side instead of the producer CPU-blocking.
+  * Takes ownership of fence_fd (-1 = none). */
+diff --git a/src/compositor.cpp b/src/compositor.cpp
+index 2d09981696..ce2dda735e 100644
+--- a/src/compositor.cpp
++++ b/src/compositor.cpp
+@@ -8,6 +8,7 @@
+ */
+ #include "compositor.h"
+ 
++#include "backends/anland/anland_backend.h"
+ #include "config-kwin.h"
+ 
+ #include "core/backendoutput.h"
+@@ -194,6 +195,10 @@ const auto s_drmDevicesEnv = splitPathList(qgetenv("KWIN_DRM_DEVICES"), ':');
+ 
+ static RenderDevice *selectRenderDevice()
+ {
++    if (auto *anlandBackend = qobject_cast<AnlandBackend *>(kwinApp()->outputBackend())) {
++        return anlandBackend->renderDevice();
++    }
++
+     for (const QByteArray &path : s_drmDevicesEnv) {
+         struct stat buf;
+         if (stat(path.data(), &buf) == -1) {

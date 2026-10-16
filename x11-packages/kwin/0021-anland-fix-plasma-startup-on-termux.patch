@@ -1,0 +1,130 @@
+From c8567d108064d08883b85fcc929eb98e9130a8db Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Fri, 16 Oct 2026 22:19:33 +0800
+Subject: [PATCH] backends/anland: fix Plasma startup on Termux
+
+Wait for KWin to register its D-Bus interface before publishing the Anland
+session environment and releasing Plasma's startup barrier. Since the
+wrapper no longer pre-creates the Wayland socket in this mode, reporting
+readiness immediately can launch kded6 and ksplashqml before KWin binds it.
+
+Resolve explicitly registered render devices when the DRM compatibility
+map has no entry. Anland's no-DRM render device is absent from libdrm's
+enumeration, but must still be found to import client dma-bufs in KGSL
+sessions.
+
+Reject cropped or scaled primary-layer configurations because the Anland
+consumer always presents the entire fixed-size buffer. This makes KWin
+fall back to full-scene composition instead of stretching a cursor-only
+layer across the output.
+---
+ src/backends/anland/anland_egl_backend.cpp   |  9 ++++++
+ src/backends/anland/anland_egl_backend.h     |  1 +
+ src/core/gpumanager.cpp                      |  4 ++-
+ src/helpers/wayland_wrapper/kwin_wrapper.cpp | 29 +++++++++++++++-----
+ 4 files changed, 35 insertions(+), 8 deletions(-)
+
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index a6df781dd9..3af6ff491a 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -196,6 +196,15 @@ void AnlandEglLayer::onOutputTransformChanged()
+     scheduleRepaint(nullptr);
+ }
+ 
++bool AnlandEglLayer::preparePresentationTest()
++{
++    // The consumer always presents the entire fixed-size buffer. Reject layer
++    // assignments that would require it to crop, scale or position the contents
++    // (including compositing only the cursor into the primary layer).
++    const Rect nativeRect(QPoint(), m_output->modeSize());
++    return targetRect() == nativeRect && sourceRect() == RectF(nativeRect);
++}
++
+ std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::beginFrame(OutputFrame *frame)
+ {
+     if (!m_backend->openglContext()->makeCurrent()) {
+diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
+index de12d5cf58..736349c096 100644
+--- a/src/backends/anland/anland_egl_backend.h
++++ b/src/backends/anland/anland_egl_backend.h
+@@ -44,6 +44,7 @@ public:
+     AnlandEglLayer(AnlandOutput *output, AnlandEglBackend *backend);
+     ~AnlandEglLayer() override;
+ 
++    bool preparePresentationTest() override;
+     std::optional<OutputLayerBeginFrameInfo> beginFrame(OutputFrame *frame) override;
+     bool endFrame(const Region &renderedDeviceRegion, const Region &damagedDeviceRegion, OutputFrame *frame) override;
+     FormatModifierMap supportedDrmFormats() const override;
+diff --git a/src/core/gpumanager.cpp b/src/core/gpumanager.cpp
+index bad441aa37..b8df7153d3 100644
+--- a/src/core/gpumanager.cpp
++++ b/src/core/gpumanager.cpp
+@@ -116,7 +116,9 @@ RenderDevice *GpuManager::compatibleRenderDevice(DrmDevice *dev) const
+ RenderDevice *GpuManager::compatibleRenderDevice(dev_t id) const
+ {
+     auto it = m_compatibleDeviceMap.find(id);
+-    return it == m_compatibleDeviceMap.end() ? nullptr : it.value();
++    // Backends may register render devices without a DRM node. Such devices
++    // cannot appear in libdrm's enumeration, but can still import their buffers.
++    return it == m_compatibleDeviceMap.end() ? findDevice(id) : it.value();
+ }
+ 
+ RenderDevice *GpuManager::findDevice(dev_t id) const
+diff --git a/src/helpers/wayland_wrapper/kwin_wrapper.cpp b/src/helpers/wayland_wrapper/kwin_wrapper.cpp
+index dc6da89929..46a87fe693 100644
+--- a/src/helpers/wayland_wrapper/kwin_wrapper.cpp
++++ b/src/helpers/wayland_wrapper/kwin_wrapper.cpp
+@@ -24,6 +24,7 @@
+ 
+ #include <QCoreApplication>
+ #include <QDBusConnection>
++#include <QDBusServiceWatcher>
+ #include <QDebug>
+ #include <QProcess>
+ #include <QTemporaryFile>
+@@ -182,8 +183,6 @@ void KWinWrapper::run()
+         m_kwinProcess->start();
+     });
+ 
+-    m_kwinProcess->start();
+-
+     QProcessEnvironment env;
+     env.insert("WAYLAND_DISPLAY", m_socket ? QString::fromUtf8(wl_socket_get_display_name(m_socket)) : QStringLiteral("wayland-0"));
+ #if KWIN_BUILD_X11
+@@ -194,11 +193,27 @@ void KWinWrapper::run()
+         }
+     }
+ #endif
+-    auto envSyncJob = new KUpdateLaunchEnvironmentJob(env);
+-    connect(envSyncJob, &KUpdateLaunchEnvironmentJob::finished, this, []() {
+-        // The service name is merely there to indicate to the world that we're up and ready with all envs exported
+-        QDBusConnection::sessionBus().registerService(QStringLiteral("org.kde.KWinWrapper"));
+-    });
++    const auto publishEnvironment = [this, env]() {
++        auto envSyncJob = new KUpdateLaunchEnvironmentJob(env);
++        connect(envSyncJob, &KUpdateLaunchEnvironmentJob::finished, this, []() {
++            // Plasma starts its Wayland clients once this service is registered.
++            QDBusConnection::sessionBus().registerService(QStringLiteral("org.kde.KWinWrapper"));
++        });
++    };
++    if (!m_socket) {
++        // Anland lets KWin create its own socket after QApplication initializes.
++        // KWin registers its D-Bus interface after binding that socket, so wait
++        // for it before releasing Plasma's startup barrier.
++        auto watcher = new QDBusServiceWatcher(QStringLiteral("org.kde.KWin"), QDBusConnection::sessionBus(), QDBusServiceWatcher::WatchForRegistration, this);
++        connect(watcher, &QDBusServiceWatcher::serviceRegistered, this, [watcher, publishEnvironment]() {
++            watcher->deleteLater();
++            publishEnvironment();
++        });
++    }
++    m_kwinProcess->start();
++    if (m_socket) {
++        publishEnvironment();
++    }
+ }
+ 
+ void KWinWrapper::terminate(std::chrono::milliseconds timeout)
+-- 
+2.47.3
+
