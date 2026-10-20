@@ -3,10 +3,11 @@ TERMUX_PKG_DESCRIPTION="Mozilla Firefox web browser"
 TERMUX_PKG_LICENSE="MPL-2.0"
 TERMUX_PKG_MAINTAINER="@termux"
 TERMUX_PKG_VERSION="159.0"
+TERMUX_PKG_REVISION=90
 TERMUX_PKG_SRCURL="https://archive.mozilla.org/pub/firefox/releases/${TERMUX_PKG_VERSION#*really}/source/firefox-${TERMUX_PKG_VERSION#*really}.source.tar.xz"
 TERMUX_PKG_SHA256=3d98df785894057fce60603e845828e758a5411ad79aaaaff2b8230597f500d9
 # ffmpeg and pulseaudio are dependencies through dlopen(3):
-TERMUX_PKG_DEPENDS="ffmpeg, fontconfig, freetype, gdk-pixbuf, glib, gtk3, libandroid-shmem, libandroid-spawn, libc++, libcairo, libevent, libffi, libice, libicu, libjpeg-turbo, libnspr, libnss, libpixman, libsm, libvpx, libwayland, libwebp, libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxkbcommon, libxrandr, libxtst, pango, pulseaudio, zlib"
+TERMUX_PKG_DEPENDS="ffmpeg, fontconfig, freetype, gdk-pixbuf, glib, gtk3, libandroid-shmem, libandroid-spawn, libc++, libcairo, libevent, libffi, libice, libicu, libjpeg-turbo, libnspr, libnss, libpixman, libsm, libva, libvpx, libwayland, libwebp, libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxkbcommon, libxrandr, libxtst, pango, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="libcpufeatures, libice, libsm"
 TERMUX_PKG_BUILD_IN_SRC=true
 TERMUX_PKG_AUTO_UPDATE=true
