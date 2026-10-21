@@ -1,0 +1,53 @@
+From 9ef2cd6d365cc8e57063dc43ff4612357094bf81 Mon Sep 17 00:00:00 2001
+From: Goldzxcbug <Zxc20060226@outlook.com>
+Date: Mon, 12 Oct 2026 22:13:09 +0800
+Subject: [PATCH 19/21] wayland: optimize dma-buf synchronization for Anland
+
+Honor ANLAND_SKIP_IMPLICIT_SYNC_WAIT in the Wayland transaction path so Anland sessions can rely on EGL implicit synchronization without installing a duplicate per-buffer wait.
+
+Coalesce duplicate damage after all per-device regions already contain it.
+---
+ src/scene/surfaceitem.cpp   | 10 ++++++++++
+ src/wayland/transaction.cpp |  8 ++++++++
+ 2 files changed, 18 insertions(+)
+
+diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
+index 3d3259cf8c..f97e35eb88 100644
+--- a/src/scene/surfaceitem.cpp
++++ b/src/scene/surfaceitem.cpp
+@@ -139,6 +139,16 @@ void SurfaceItem::addDamage(const Region &region)
+         }
+     }
+     m_lastDamage = now;
++    bool damageAlreadyPending = !region.isEmpty() && !m_damage.empty();
++    for (const auto &entry : m_damage) {
++        if (!entry.second.contains(region.boundingRect())) {
++            damageAlreadyPending = false;
++            break;
++        }
++    }
++    if (damageAlreadyPending) {
++        return;
++    }
+     for (auto &[device, damage] : m_damage) {
+         damage += region;
+     }
+diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+index f02e38fe6c..a7219ba7d1 100644
+--- a/src/wayland/transaction.cpp
++++ b/src/wayland/transaction.cpp
+@@ -270,6 +270,14 @@ static FileDescriptor exportWaitSyncFile(const FileDescriptor &fileDescriptor)
+ void Transaction::watchDmaBuf(TransactionEntry *entry)
+ {
+ #if defined(Q_OS_LINUX)
++    // The Anland backend composites client buffers through EGL, whose implicit
++    // synchronization waits before sampling the imported texture. Skip the
++    // duplicate per-buffer wait when explicitly requested for Anland sessions.
++    // Explicit sync timelines remain unaffected.
++    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
++        return;
++    }
++
+     const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
+     if (!attributes) {
+         return;

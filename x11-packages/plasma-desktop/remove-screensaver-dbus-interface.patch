@@ -1,0 +1,14 @@
+Remove the ScreenSaver DBus interface, which is unavailable with KWin 6.8.0.
+---
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 5117af1..f3743a6 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -181,7 +181,6 @@ find_package(LibKWorkspace ${PROJECT_DEP_VERSION} CONFIG REQUIRED)
+ find_package(LibNotificationManager ${PROJECT_DEP_VERSION} CONFIG REQUIRED)
+ find_package(LibTaskManager ${PROJECT_DEP_VERSION} CONFIG REQUIRED)
+ find_package(KWinDBusInterface CONFIG REQUIRED)
+-find_package(ScreenSaverDBusInterface CONFIG REQUIRED)
+ find_package(KRunnerAppDBusInterface CONFIG REQUIRED)
+ find_package(KF6ItemModels CONFIG REQUIRED)
+ find_package(KSysGuard CONFIG REQUIRED)
