@@ -1,0 +1,70 @@
+From 28a9276b1e24afd448413ca576d53498b5531098 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 26 Jul 2026 22:48:12 +0800
+Subject: [PATCH 10/12] backends/anland: detach audio before closing transport
+ fds
+
+Invoke the fallback callback before releasing consumer resources so the
+PipeWire audio loop source is removed while its borrowed socket fd is
+still valid.
+
+Closing the fd first could race with the audio loop and leave it
+dispatching a stale source during consumer disconnects. The observed
+failures jumped to invalid callback addresses from the anland-audio
+thread.
+---
+ src/backends/anland/anland_backend.cpp | 10 ++++++----
+ src/backends/anland/display_producer.c |  7 +++++--
+ 2 files changed, 11 insertions(+), 6 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 6badd199fa..5388560de0 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -473,8 +473,9 @@ void AnlandBackend::enterFallback()
+ 
+     teardownNotifiers();
+ 
+-    // Renderer is stopped: drop the imported dmabuf set now that the producer's fds
+-    // are gone. The layer is null at startup (no GL backend attached yet).
++    // Renderer is stopped: drop the imported dmabuf set before the transport closes
++    // its fds when this callback returns. The layer is null at startup (no GL backend
++    // attached yet).
+     if (AnlandEglLayer *layer = m_outputs[0]->eglLayer()) {
+         layer->releaseBuffers();
+     }
+@@ -482,8 +483,9 @@ void AnlandBackend::enterFallback()
+     m_consumerReady = false;
+     m_inFallback = true;
+ 
+-    // Detach the audio socket: the streams keep running (capture drops its PCM, the
+-    // mic Source feeds silence) so PipeWire never perceives the disconnect.
++    // Detach the audio socket before the transport closes the borrowed fd. The streams
++    // keep running (capture drops its PCM, the mic Source feeds silence), so PipeWire
++    // never perceives the disconnect.
+     anland_audio_set_fd(-1);
+ 
+     // The consumer's camera fds are now dead: stop recording, destroy the virtual
+diff --git a/src/backends/anland/display_producer.c b/src/backends/anland/display_producer.c
+index a9deafd548..8d0e896560 100644
+--- a/src/backends/anland/display_producer.c
++++ b/src/backends/anland/display_producer.c
+@@ -67,10 +67,13 @@ static void enter_fallback(display_ctx *ctx)
+         return;
+     ctx->fallback = true;
+ 
+-    release_consumer_resources(ctx);
+-
++    /* Let the backend detach users of borrowed fds (notably PipeWire's audio
++     * loop source) before those fds are closed below. Destroying a loop source
++     * after its fd has already been closed can leave a stale dispatch entry. */
+     if (ctx->fallback_cb)
+         ctx->fallback_cb(ctx->fallback_userdata);
++
++    release_consumer_resources(ctx);
+ }
+ 
+ /*
+-- 
+2.47.3
+
