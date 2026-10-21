@@ -1,0 +1,57 @@
+From 8094f275b357169948df3e2241f126c97fd2c065 Mon Sep 17 00:00:00 2001
+From: Goldzxcbug <Zxc20060226@outlook.com>
+Date: Mon, 12 Oct 2026 22:13:09 +0800
+Subject: [PATCH 19/19] wayland: optimize dma-buf synchronization for Anland
+
+Honor ANLAND_SKIP_IMPLICIT_SYNC_WAIT in the Wayland transaction path so Anland sessions can rely on EGL implicit synchronization without installing a duplicate per-buffer wait.
+
+Also coalesce already-pending full damage from mailbox clients before propagating another repaint. Preserve the updated frame timing accounting in KWin 6.7.5.
+
+(cherry picked from commit 9a7ba82caed38d3e7edfe208fe1cd3b1acbe11a3)
+
+Co-authored-by: lfdevs <lfdevs@lfdevs.com>
+---
+ src/scene/surfaceitem.cpp   | 7 +++++++
+ src/wayland/transaction.cpp | 8 ++++++++
+ 2 files changed, 15 insertions(+)
+
+diff --git a/src/scene/surfaceitem.cpp b/src/scene/surfaceitem.cpp
+index e2a752d769..2c274e8a22 100644
+--- a/src/scene/surfaceitem.cpp
++++ b/src/scene/surfaceitem.cpp
+@@ -133,6 +133,13 @@ void SurfaceItem::addDamage(const Region &region)
+         }
+     }
+     m_lastDamage = now;
++    // Mailbox clients commonly replace a fully damaged buffer repeatedly before
++    // the next composite. The latest buffer is installed through bufferChanged,
++    // so repeating damage propagation is redundant.
++    const bool damageAlreadyPending = !region.isEmpty() && m_damage.contains(region.boundingRect());
++    if (damageAlreadyPending) {
++        return;
++    }
+     m_damage += region;
+ 
+     const RectF sourceBox = m_bufferToSurfaceTransform.map(m_bufferSourceBox, m_bufferSize);
+diff --git a/src/wayland/transaction.cpp b/src/wayland/transaction.cpp
+index 45ba20b588..42eb3488db 100644
+--- a/src/wayland/transaction.cpp
++++ b/src/wayland/transaction.cpp
+@@ -267,6 +267,14 @@ static FileDescriptor exportWaitSyncFile(const FileDescriptor &fileDescriptor)
+ void Transaction::watchDmaBuf(TransactionEntry *entry)
+ {
+ #if defined(Q_OS_LINUX)
++    // The Anland backend composites client buffers through EGL, whose implicit
++    // synchronization waits before sampling the imported texture. Skip the
++    // duplicate per-buffer wait when explicitly requested for Anland sessions.
++    // Explicit sync timelines remain unaffected.
++    if (qEnvironmentVariableIntValue("ANLAND_SKIP_IMPLICIT_SYNC_WAIT") == 1) {
++        return;
++    }
++
+     const DmaBufAttributes *attributes = entry->buffer->dmabufAttributes();
+     if (!attributes) {
+         return;
+-- 
+2.47.3
+

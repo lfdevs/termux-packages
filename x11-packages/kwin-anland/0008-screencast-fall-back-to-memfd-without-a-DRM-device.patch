@@ -1,0 +1,28 @@
+From a35e85fee7108d16f644094ac41fa89d77c00c49 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Thu, 23 Jul 2026 00:50:31 +0800
+Subject: [PATCH 08/12] screencast: fall back to memfd without a DRM device
+
+The Anland backend can run with surfaceless EGL and no KWin DrmDevice. When PipeWire is available, opening a window preview starts a screencast stream and testCreateDmaBuf() dereferences the missing device, crashing the compositor.
+
+Skip dma-buf probing when no DRM device is available so screencasting uses the existing memfd fallback instead.
+---
+ src/plugins/screencast/screencaststream.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/plugins/screencast/screencaststream.cpp b/src/plugins/screencast/screencaststream.cpp
+index cb51ca2adf..25f6b0d559 100644
+--- a/src/plugins/screencast/screencaststream.cpp
++++ b/src/plugins/screencast/screencaststream.cpp
+@@ -880,7 +880,7 @@ void ScreenCastStream::setCursorMode(ScreencastV1Interface::CursorMode mode)
+ std::optional<ScreenCastDmaBufTextureParams> ScreenCastStream::testCreateDmaBuf(const QSize &size, quint32 format, const ModifierList &modifiers)
+ {
+     EglBackend *backend = qobject_cast<EglBackend *>(Compositor::self()->backend());
+-    if (!backend) {
++    if (!backend || !backend->drmDevice()) {
+         return std::nullopt;
+     }
+ 
+-- 
+2.47.3
+
