@@ -390,7 +390,7 @@ jobs:
       contents: read
     if: github.repository == 'termux/termux-packages' && github.ref != 'refs/heads/master'
     needs: build
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-26.04
     steps:
     - name: Clone repository
       uses: actions/checkout@v7
@@ -426,7 +426,7 @@ jobs:
       contents: read
     if: github.repository == 'termux/termux-packages' && github.ref == 'refs/heads/master'
     needs: build
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-26.04
     steps:
     - name: Clone repository
       uses: actions/checkout@v7
