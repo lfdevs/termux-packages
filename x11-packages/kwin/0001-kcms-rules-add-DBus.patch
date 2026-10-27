@@ -1,0 +1,22 @@
+From 54d6e73f65600176c94a9014437ee1a8283bbb72 Mon Sep 17 00:00:00 2001
+From: BullyMaguire-lol <tem9040@gmail.com>
+Date: Sun, 5 Jul 2026 22:23:47 +0800
+Subject: [PATCH 01/21] kcms/rules: add DBus
+
+Co-authored-by: Robert Kirkman <rkirkman@termux.dev>
+---
+ src/kcms/rules/CMakeLists.txt | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/kcms/rules/CMakeLists.txt b/src/kcms/rules/CMakeLists.txt
+index d8ee1e0ec6..da09e83e20 100644
+--- a/src/kcms/rules/CMakeLists.txt
++++ b/src/kcms/rules/CMakeLists.txt
+@@ -28,6 +28,7 @@ endif()
+ 
+ set(kcm_libs
+     Qt::Quick
++    Qt::DBus
+ 
+     KF6::KCMUtils
+     KF6::I18n

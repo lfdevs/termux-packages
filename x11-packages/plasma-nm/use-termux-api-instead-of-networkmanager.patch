@@ -1,5 +1,7 @@
+Port Plasma Network Management to Termux API on Plasma 6.8.0.
+---
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 90bddd5..427184c 100644
+index a6b5eda..542e6f7 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -41,7 +41,6 @@ find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS
@@ -10,7 +12,7 @@ index 90bddd5..427184c 100644
  
  find_package(PkgConfig REQUIRED)
  
-@@ -64,7 +63,6 @@ find_package(KF6 ${KF6_MIN_VERSION} REQUIRED
+@@ -64,14 +63,12 @@ find_package(KF6 ${KF6_MIN_VERSION} REQUIRED
      KIO
      I18n
      JobWidgets
@@ -18,15 +20,14 @@ index 90bddd5..427184c 100644
      Notifications
      Service
      Solid
-@@ -72,7 +70,6 @@ find_package(KF6 ${KF6_MIN_VERSION} REQUIRED
+     WidgetsAddons
      WindowSystem
      KCMUtils
-     Svg
 -    ModemManagerQt
  )
  
  find_package(Plasma ${PROJECT_DEP_VERSION} REQUIRED)
-@@ -100,9 +97,6 @@ set_package_properties(KF6QuickCharts PROPERTIES
+@@ -99,9 +96,6 @@ set_package_properties(KF6QuickCharts PROPERTIES
  
  find_package(OpenSSL REQUIRED)
  
@@ -36,7 +37,7 @@ index 90bddd5..427184c 100644
  
  find_package(QCoro6 REQUIRED COMPONENTS Core DBus)
  
-@@ -117,10 +111,6 @@ add_definitions(-DQT_NO_URL_CAST_FROM_STRING)
+@@ -116,10 +110,6 @@ add_definitions(-DQT_NO_URL_CAST_FROM_STRING)
  remove_definitions(-DQT_NO_CAST_FROM_ASCII -DQT_NO_CAST_FROM_BYTEARRAY)
  
  add_subdirectory(applet)

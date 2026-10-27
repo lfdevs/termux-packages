@@ -1,0 +1,109 @@
+From 26a416fa03b93f003c58b9b589e42abb116dcc60 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Mon, 27 Jul 2026 02:50:10 +0800
+Subject: [PATCH 11/21] plugins/qpa: avoid null paint devices after buffer
+ failures
+
+Use a lazily allocated QImage as the paint device when the backing store
+cannot create a swapchain, acquire a graphics buffer, or map it. Clear
+invalid buffer state and skip flushes until a real buffer is available.
+---
+ src/plugins/qpa/backingstore.cpp | 24 ++++++++++++++++++++++--
+ src/plugins/qpa/backingstore.h   |  5 +++++
+ 2 files changed, 27 insertions(+), 2 deletions(-)
+
+diff --git a/src/plugins/qpa/backingstore.cpp b/src/plugins/qpa/backingstore.cpp
+index c404e80796..6b3abe7253 100644
+--- a/src/plugins/qpa/backingstore.cpp
++++ b/src/plugins/qpa/backingstore.cpp
+@@ -30,21 +30,37 @@ BackingStore::BackingStore(QWindow *window)
+ 
+ QPaintDevice *BackingStore::paintDevice()
+ {
+-    return m_bufferView->image();
++    return m_bufferView ? m_bufferView->image() : fallbackImage();
+ }
+ 
+ void BackingStore::resize(const QSize &size, const QRegion &staticContents)
+ {
++    m_size = size;
++    m_fallbackImage = QImage();
++
+     QPlatformWindow *platformWindow = static_cast<QPlatformWindow *>(window()->handle());
+     platformWindow->invalidateSurface();
+ }
+ 
++QImage *BackingStore::fallbackImage()
++{
++    const qreal scale = window()->devicePixelRatio();
++    const QSize nativeSize = (m_size * scale).expandedTo(QSize(1, 1));
++    if (m_fallbackImage.size() != nativeSize || m_fallbackImage.devicePixelRatio() != scale) {
++        m_fallbackImage = QImage(nativeSize, QImage::Format_ARGB32_Premultiplied);
++        m_fallbackImage.setDevicePixelRatio(scale);
++    }
++    return &m_fallbackImage;
++}
++
+ void BackingStore::beginPaint(const QRegion &region)
+ {
+     Window *platformWindow = static_cast<Window *>(window()->handle());
+     Swapchain *swapchain = platformWindow->swapchain(nullptr, {{DRM_FORMAT_ARGB8888, {DRM_FORMAT_MOD_LINEAR}}});
+     if (!swapchain) {
+         qCCritical(KWIN_QPA, "Failed to create a swapchain for the backing store!");
++        m_buffer = nullptr;
++        m_bufferView.reset();
+         return;
+     }
+ 
+@@ -52,6 +68,8 @@ void BackingStore::beginPaint(const QRegion &region)
+     const auto slot = swapchain->acquire();
+     if (!slot) {
+         qCCritical(KWIN_QPA, "Failed to acquire a graphics buffer for the backing store");
++        m_buffer = nullptr;
++        m_bufferView.reset();
+         return;
+     }
+     m_buffer = slot->buffer();
+@@ -59,6 +77,8 @@ void BackingStore::beginPaint(const QRegion &region)
+     m_bufferView = std::make_unique<GraphicsBufferView>(m_buffer.get(), GraphicsBuffer::Read | GraphicsBuffer::Write);
+     if (m_bufferView->isNull()) {
+         qCCritical(KWIN_QPA) << "Failed to map a graphics buffer for the backing store";
++        m_buffer = nullptr;
++        m_bufferView.reset();
+         return;
+     }
+ 
+@@ -89,7 +109,7 @@ void BackingStore::flush(QWindow *window, const QRegion &region, const QPoint &o
+ {
+     Window *platformWindow = static_cast<Window *>(window->handle());
+     InternalWindow *internalWindow = platformWindow->internalWindow();
+-    if (!internalWindow) {
++    if (!internalWindow || !m_buffer) {
+         return;
+     }
+ 
+diff --git a/src/plugins/qpa/backingstore.h b/src/plugins/qpa/backingstore.h
+index 9abab071b0..7fafc6bc81 100644
+--- a/src/plugins/qpa/backingstore.h
++++ b/src/plugins/qpa/backingstore.h
+@@ -9,6 +9,7 @@
+ */
+ #pragma once
+ 
++#include <QImage>
+ #include <QPointer>
+ 
+ #include <qpa/qplatformbackingstore.h>
+@@ -35,8 +36,12 @@ public:
+     void endPaint() override;
+ 
+ private:
++    QImage *fallbackImage();
++
+     GraphicsBufferRef m_buffer;
+     std::unique_ptr<GraphicsBufferView> m_bufferView;
++    QImage m_fallbackImage;
++    QSize m_size;
+ };
+ 
+ }
