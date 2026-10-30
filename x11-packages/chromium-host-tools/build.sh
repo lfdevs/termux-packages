@@ -282,7 +282,7 @@ use_ozone = true
 ozone_auto_platforms = false
 ozone_platform = \"x11\"
 ozone_platform_x11 = true
-# TODO: Enable wayland
+# Host tools do not build the Chrome browser target.
 ozone_platform_wayland = false
 ozone_platform_headless = true
 angle_enable_vulkan = true

@@ -1,0 +1,25 @@
+The Termux target sysroot provides Wayland 1.26, but Chromium's host toolchain
+uses the Debian Bullseye sysroot, whose Wayland packages are too old for the
+Chromium 156 requirement. Build host-tool Wayland targets from Chromium's
+bundled sources while keeping the target toolchain linked against the system
+Wayland libraries supplied by Termux.
+
+--- a/third_party/wayland/BUILD.gn
++++ b/third_party/wayland/BUILD.gn
+@@ -10,4 +10,9 @@
+ assert(is_linux || is_chromeos || target_os == "linux")
+-
++
+-if (!use_system_libwayland) {
++# Host tools must use the bundled sources because their Debian sysroot can
++# contain an older Wayland version than the Termux target sysroot.
++_use_system_libwayland =
++    use_system_libwayland && current_toolchain != host_toolchain
++
++if (!_use_system_libwayland) {
+   wayland_protocol("wayland_protocol_c") {
+@@ -239,3 +244,3 @@
+ } else {
+-  # use_system_libwayland
++  # _use_system_libwayland
+   import("wayland_version.gni")
