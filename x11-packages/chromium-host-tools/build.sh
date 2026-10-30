@@ -9,8 +9,8 @@ TERMUX_PKG_SRCURL="https://github.com/chromium-linux-tarballs/chromium-tarballs/
 TERMUX_PKG_SHA256=bb701465f0d3991e7266d24add8b0d39e202a1f209a5b169387785326b0d079a
 TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libva, libxkbcommon, libminizip, libnss, libx11, mesa, openssl, pango, pipewire, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="libffi-static"
-# Chromium doesn't support i686 on Linux.
-TERMUX_PKG_EXCLUDED_ARCHES="i686"
+# Only build for aarch64 to save time
+TERMUX_PKG_EXCLUDED_ARCHES="arm, i686, x86_64"
 TERMUX_PKG_NO_STRIP=true
 TERMUX_PKG_NO_ELF_CLEANER=true
 TERMUX_PKG_AUTO_UPDATE=true
@@ -282,7 +282,7 @@ use_ozone = true
 ozone_auto_platforms = false
 ozone_platform = \"x11\"
 ozone_platform_x11 = true
-# TODO: Enable wayland
+# Host tools do not build the Chrome browser target.
 ozone_platform_wayland = false
 ozone_platform_headless = true
 angle_enable_vulkan = true
