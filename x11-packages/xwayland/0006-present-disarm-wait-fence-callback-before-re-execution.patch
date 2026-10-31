@@ -1,0 +1,42 @@
+From 50bc7a364fa7c7db1a2fef5f83cc3a1913ca53cb Mon Sep 17 00:00:00 2001
+From: KiralyCraft <alexucu@gmail.com>
+Date: Thu, 8 Oct 2026 16:20:38 +0800
+Subject: [PATCH 6/6] present: disarm the wait-fence callback before
+ re-execution
+
+A fence notification is one-shot, but re_execute() can leave the Present
+request alive while it waits for its target MSC. Clear the callback before
+re-entering the execution path. If that path must wait again, it installs
+a new callback itself.
+
+This is required when the Sync trigger walker restarts after a callback:
+otherwise a still-live request can be called repeatedly in the same scan.
+It also prevents a later trigger of a reused fence from executing the old
+request again.
+
+The same callback-lifetime correction is used by Termux:X11:
+https://github.com/KiralyCraft/termux-x11/commit/fc534e514d7ad4851d0aca3357495816260e4549
+
+This patch is from https://github.com/lfdevs/xwayland/pull/2.
+---
+ present/present_execute.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/present/present_execute.c b/present/present_execute.c
+index 5253344a1..9e11a3473 100644
+--- a/present/present_execute.c
++++ b/present/present_execute.c
+@@ -38,6 +38,10 @@ present_wait_fence_triggered(void *param)
+     ScreenPtr               screen = vblank->screen;
+     present_screen_priv_ptr screen_priv = present_screen_priv(screen);
+ 
++    /* Re-execution may keep this request alive until its target MSC.
++     * Disarm this notification; a new wait will install a new callback. */
++    present_fence_set_callback(vblank->wait_fence, NULL, NULL);
++
+     screen_priv->re_execute(vblank);
+ }
+ 
+-- 
+2.47.3
+
