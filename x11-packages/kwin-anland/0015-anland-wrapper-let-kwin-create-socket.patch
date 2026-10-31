@@ -1,0 +1,75 @@
+From d001555e621c887046fe00c44e319487c6a3660e Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sat, 10 Oct 2026 19:20:47 +0800
+Subject: [PATCH] helpers/wayland_wrapper: let Anland KWin create its socket
+
+The wrapper's pre-created socket is passed as --wayland-fd. On Android this
+causes KWin's internal QPA initialization to touch the listening socket before
+the compositor is ready and crash. Let KWin create its own wayland-0 socket in
+Anland mode while retaining wrapper restart and environment synchronization.
+---
+ src/helpers/wayland_wrapper/kwin_wrapper.cpp | 27 +++++++++++++++-----
+ 1 file changed, 20 insertions(+), 7 deletions(-)
+
+diff --git a/src/helpers/wayland_wrapper/kwin_wrapper.cpp b/src/helpers/wayland_wrapper/kwin_wrapper.cpp
+index 349e312eaa..f8d990eddd 100644
+--- a/src/helpers/wayland_wrapper/kwin_wrapper.cpp
++++ b/src/helpers/wayland_wrapper/kwin_wrapper.cpp
+@@ -76,9 +76,16 @@ KWinWrapper::KWinWrapper(QObject *parent)
+     , m_kwinProcess(new QProcess(this))
+     , m_watchdogInterval(std::chrono::microseconds(qEnvironmentVariableIntValue("WATCHDOG_USEC", &m_watchdogIntervalOk) / 2))
+ {
+-    m_socket = wl_socket_create();
+-    if (!m_socket) {
+-        qFatal("Could not create wayland socket");
++    if (qEnvironmentVariableIsSet("ANLAND_SOCKET")) {
++        // In Anland mode KWin must create its own socket after QApplication has
++        // initialized. Pre-creating it here makes the internal QPA path see an
++        // already-open compositor socket and crash while constructing Qt.
++        m_socket = nullptr;
++    } else {
++        m_socket = wl_socket_create();
++        if (!m_socket) {
++            qFatal("Could not create wayland socket");
++        }
+     }
+ 
+ #if KWIN_BUILD_X11
+@@ -101,7 +108,9 @@ KWinWrapper::KWinWrapper(QObject *parent)
+ 
+ KWinWrapper::~KWinWrapper()
+ {
+-    wl_socket_destroy(m_socket);
++    if (m_socket) {
++        wl_socket_destroy(m_socket);
++    }
+     terminate(30s);
+ }
+ 
+@@ -111,8 +120,12 @@ void KWinWrapper::run()
+ 
+     QStringList args;
+ 
+-    args << "--wayland-fd" << QString::number(wl_socket_get_fd(m_socket));
+-    args << "--socket" << QString::fromUtf8(wl_socket_get_display_name(m_socket));
++    if (m_socket) {
++        args << "--wayland-fd" << QString::number(wl_socket_get_fd(m_socket));
++        args << "--socket" << QString::fromUtf8(wl_socket_get_display_name(m_socket));
++    } else {
++        args << "--socket" << "wayland-0";
++    }
+ 
+ #if KWIN_BUILD_X11
+     if (m_xwlSocket) {
+@@ -164,7 +177,7 @@ void KWinWrapper::run()
+     m_kwinProcess->start();
+ 
+     QProcessEnvironment env;
+-    env.insert("WAYLAND_DISPLAY", QString::fromUtf8(wl_socket_get_display_name(m_socket)));
++    env.insert("WAYLAND_DISPLAY", m_socket ? QString::fromUtf8(wl_socket_get_display_name(m_socket)) : QStringLiteral("wayland-0"));
+ #if KWIN_BUILD_X11
+     if (m_xwlSocket) {
+         env.insert("DISPLAY", m_xwlSocket->name());
+-- 
+2.47.3
+

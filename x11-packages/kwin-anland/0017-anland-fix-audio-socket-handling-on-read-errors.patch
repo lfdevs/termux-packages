@@ -1,0 +1,68 @@
+From 145f9e6145b2ea474f28901947ce6735baa7c5cd Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E9=BE=9F=E4=BB=99=E4=BA=BA?=
+ <160681686+superturtlee@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 22:09:54 +0800
+Subject: [PATCH 17/19] backends/anland: fix audio socket handling on read
+ errors
+
+Handle orderly shutdown and read errors on the consumer audio socket so the PipeWire loop source is removed instead of repeatedly dispatching a dead descriptor.
+
+(cherry picked from commit e142ba3d1cea041b73ff822c062de5fb6991e462)
+
+Co-authored-by: PrestarLin <prestarlin@users.noreply.github.com>
+Co-authored-by: lfdevs <lfdevs@lfdevs.com>
+---
+ src/backends/anland/anland_audio.c | 31 ++++++++++++++++++++++++++++--
+ 1 file changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/src/backends/anland/anland_audio.c b/src/backends/anland/anland_audio.c
+index 67f325191d..fb6a5d08af 100644
+--- a/src/backends/anland/anland_audio.c
++++ b/src/backends/anland/anland_audio.c
+@@ -232,14 +232,41 @@ static void apply_format(struct anland_audio *a, const struct audio_format *f)
+ static void on_audio_readable(void *data, int fd, uint32_t mask)
+ {
+     struct anland_audio *a = data;
+-    if (mask & (SPA_IO_ERR | SPA_IO_HUP))
++    if (mask & (SPA_IO_ERR | SPA_IO_HUP)) {
++        /* The consumer's audio socket went away (peer closed or errored). Drop the
++         * io source immediately: if it stays registered the loop polls a dead fd,
++         * epoll reports HUP/ERR forever and this thread busy-loops at 100% CPU.
++         * Mirror anland_audio_set_fd(-1): the fd is borrowed (never closed here),
++         * the ring is discarded, and the next consumer reconnect re-attaches a
++         * fresh socket. The pw_streams keep running (capture drops PCM, the mic
++         * source feeds silence) so PipeWire never sees the device disappear. */
++        struct pw_loop *loop = pw_thread_loop_get_loop(a->loop);
++        if (a->io) {
++            pw_loop_destroy_source(loop, a->io);
++            a->io = NULL;
++        }
++        a->audio_fd = -1;
++        ring_reset(a);
+         return;
++    }
+     if (!(mask & SPA_IO_IN))
+         return;
+ 
+     for (;;) {
+         ssize_t n = recv(fd, a->rx, sizeof(a->rx), MSG_DONTWAIT);
+-        if (n <= 0)
++        if (n == 0) {
++            /* Peer did an orderly shutdown: recv()==0 forever. Same busy-loop
++             * hazard as HUP above, so tear the io source down the same way. */
++            struct pw_loop *loop = pw_thread_loop_get_loop(a->loop);
++            if (a->io) {
++                pw_loop_destroy_source(loop, a->io);
++                a->io = NULL;
++            }
++            a->audio_fd = -1;
++            ring_reset(a);
++            break;
++        }
++        if (n < 0)
+             break;
+         if ((size_t)n < sizeof(struct audio_msg))
+             continue;
+-- 
+2.47.3
+

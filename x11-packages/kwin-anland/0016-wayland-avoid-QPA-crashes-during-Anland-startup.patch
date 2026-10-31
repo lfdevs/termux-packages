@@ -1,0 +1,43 @@
+From b9c82495c5a72b4c234ce943b002dff7ba3c5e85 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sat, 10 Oct 2026 19:36:04 +0800
+Subject: [PATCH] wayland: avoid QPA crashes during Anland startup
+
+Hide the inherited Wayland display and KDE session environment variables
+while constructing KWin's QApplication in Anland mode.
+
+Qt's internal KWin QPA plugin and KDE theme integration may otherwise
+initialize against the compositor socket too early, causing a crash on
+Android. Preserve the original environment for child processes.
+---
+ src/main_wayland.cpp | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/src/main_wayland.cpp b/src/main_wayland.cpp
+index b74061d679..a4328a36ca 100644
+--- a/src/main_wayland.cpp
++++ b/src/main_wayland.cpp
+@@ -292,6 +292,20 @@ int main(int argc, char *argv[])
+ 
+     QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+ 
++    // The wrapper creates the compositor's own Wayland socket before starting KWin
++    // and exports its name as WAYLAND_DISPLAY. If Qt sees that inherited value while
++    // constructing QApplication, the internal KWin QPA plugin tries to connect to
++    // the compositor socket before the Wayland server is initialized. In Anland mode
++    // this causes a null dereference on Android. Keep the value in the copied startup
++    // environment for child clients, but hide it from KWin's own Qt initialization.
++    if (qEnvironmentVariableIsSet("ANLAND_SOCKET")) {
++        qunsetenv("WAYLAND_DISPLAY");
++        qunsetenv("KDE_FULL_SESSION");
++        qunsetenv("KDE_SESSION_VERSION");
++        qunsetenv("KDE_SESSION_UID");
++        qunsetenv("KDE_APPLICATIONS_AS_SCOPE");
++    }
++
+     // enforce our internal qpa plugin, unfortunately command line switch has precedence
+     setenv("QT_QPA_PLATFORM", "wayland-org.kde.kwin.qpa", true);
+ 
+-- 
+2.47.3
+
