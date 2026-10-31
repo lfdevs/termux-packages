@@ -1,0 +1,53 @@
+Use the explicit MOZ_DRM_DEVICE path for VA-API probing when glxtest cannot
+report a standard DRM render node in a DRM-less Termux environment.
+
+Termux does not expose a standard `/dev/dri` device list, while the Wayland
+Mesa stack can still provide a usable KGSL render node through `MOZ_DRM_DEVICE`.
+The graphics probe otherwise tries to enumerate DRM devices with libdrm and
+records a warning when that enumeration fails. Firefox treats that warning as
+a failed glxtest and disables all hardware video decoder gfx variables. Honor
+the explicit Termux render-device override before probing libdrm, and use the
+unversioned Termux libdrm name for the fallback path.
+
+--- a/widget/gtk/GfxInfo.cpp
++++ b/widget/gtk/GfxInfo.cpp
+@@ -422,4 +422,12 @@
+     NS_WARNING("Failed to parse GL version!");
+   }
+-
++#ifdef __TERMUX__
++  if (drmRenderDevice.IsEmpty()) {
++    const char* drmDeviceOverride = PR_GetEnv("MOZ_DRM_DEVICE");
++    if (drmDeviceOverride && *drmDeviceOverride) {
++      drmRenderDevice.Assign(drmDeviceOverride);
++    }
++  }
++#endif
++
+   mDrmRenderDevice = std::move(drmRenderDevice);
+--- a/toolkit/xre/gfxtest/glxtest.cpp
++++ b/toolkit/xre/gfxtest/glxtest.cpp
+@@ -159,7 +159,11 @@
+ #  define LIBEGL_FILENAME "libEGL.so.1"
+ #  define LIBDRM_FILENAME "libdrm.so.2"
+ #endif
+-
++#ifdef __TERMUX__
++#  undef LIBDRM_FILENAME
++#  define LIBDRM_FILENAME "libdrm.so"
++#endif
++
+ #ifdef MOZ_X11
+ static int x_error_handler(Display*, XErrorEvent* ev) {
+   record_error(
+@@ -615,4 +620,10 @@
+       const char* deviceString =
+           eglQueryDeviceStringEXT(device, EGL_DRM_DEVICE_FILE_EXT);
++#ifdef __TERMUX__
++      const char* drmDeviceOverride = getenv("MOZ_DRM_DEVICE");
++      if (drmDeviceOverride && *drmDeviceOverride) {
++        set_render_device_path(drmDeviceOverride);
++      } else
++#endif
+       if (!deviceString || !get_render_name(deviceString)) {
+         const char* renderNodeString =
