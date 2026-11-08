@@ -2,9 +2,10 @@ TERMUX_PKG_HOMEPAGE=https://www.chromium.org/Home
 TERMUX_PKG_DESCRIPTION="Chromium web browser"
 TERMUX_PKG_LICENSE="BSD 3-Clause"
 TERMUX_PKG_MAINTAINER="@licy183"
-TERMUX_PKG_VERSION="156.0.8078.79"
+TERMUX_PKG_VERSION="157.0.8103.38"
+TERMUX_PKG_REVISION=1
 TERMUX_PKG_SRCURL="https://github.com/chromium-linux-tarballs/chromium-tarballs/releases/download/$TERMUX_PKG_VERSION/chromium-$TERMUX_PKG_VERSION-linux.tar.xz"
-TERMUX_PKG_SHA256=362f7f0f21e69431540757b69044c4581146f23c9afec8e6b0a6abe1037bd351
+TERMUX_PKG_SHA256=29904f34e47900e96b595e744a91ed23afc5f3060bf0e9f65817a043957ce7ad
 TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libxkbcommon, libminizip, libnss, libx11, mesa, openssl, pango, pipewire, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="chromium-host-tools, libffi-static"
 # Chromium doesn't support i686 on Linux.
@@ -263,8 +264,7 @@ use_ozone = true
 ozone_auto_platforms = false
 ozone_platform = \"x11\"
 ozone_platform_x11 = true
-# TODO: Enable wayland
-ozone_platform_wayland = false
+ozone_platform_wayland = true
 ozone_platform_headless = true
 angle_enable_vulkan = true
 angle_enable_swiftshader = true
@@ -296,7 +296,7 @@ use_jumbo_build = true
 # Compile pdfium as a static library
 pdf_is_complete_lib = true
 # Disable v8's metagen
-v8_use_metagen_instance_types = false
+v8_use_metagen = false
 " > $_common_args_file
 
 	if [ "$TERMUX_ARCH" = "arm" ]; then
@@ -383,7 +383,6 @@ termux_step_make_install() {
 		chrome_crashpad_handler
 		headless_shell
 		chromedriver
-		generate_colors_info
 
 		# Resource files
 		chrome_100_percent.pak
@@ -449,6 +448,9 @@ termux_step_make_install() {
 		-e 's/@@usr_bin_symlink_name/chromium-browser/g' \
 		-e 's|@@uri_scheme|x-scheme-handler/chromium;|g' \
 		-e 's/@@extra_desktop_entries//g' \
+		-e "s|@@desktop_exec|$TERMUX_PREFIX/bin/chromium-browser|g" \
+		-e 's|@@startup_wm_class|Chromium-browser|g' \
+		-e 's|@@desktop_icon|chromium|g' \
 		-e "s|Exec=/usr/bin|Exec=$TERMUX_PREFIX/bin|g" \
 		"$TERMUX_PREFIX/share/applications/chromium.desktop" \
 		"$TERMUX_PREFIX/share/man/man1/chromium.1"
