@@ -1,0 +1,221 @@
+From 1aa22efa342af4b029ac2a67f48e458bc9288399 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 5 Jul 2026 22:28:38 +0800
+Subject: [PATCH 02/12] udev: provide Android UDev stubs
+
+---
+ CMakeLists.txt                            |   2 +-
+ src/CMakeLists.txt                        |   2 +-
+ src/core/gpumanager.cpp                   |  10 +-
+ src/plugins/gamecontroller/CMakeLists.txt |   2 +-
+ src/utils/udev.cpp                        | 128 ++++++++++++++++++++++
+ 5 files changed, 137 insertions(+), 7 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 460fb29291..e2efbb2437 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -301,7 +301,7 @@ endif()
+ find_package(Libeis-1.0 1.4)
+ set_package_properties(Libeis-1.0 PROPERTIES TYPE OPTIONAL PURPOSE "Required for emulated input handling.")
+ 
+-find_package(UDev)
++#find_package(UDev)
+ set_package_properties(UDev PROPERTIES
+     URL "https://www.freedesktop.org/wiki/Software/systemd/"
+     DESCRIPTION "Linux device library."
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index ac1a3a566d..f35956b6b2 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -278,7 +278,7 @@ target_link_libraries(kwin
+         KDecoration3::KDecoration
+         KDecoration3::KDecoration3Private
+ 
+-        UDev::UDev
++#       UDev::UDev
+         XKB::XKB
+         EGL::EGL
+         epoxy::epoxy
+diff --git a/src/core/gpumanager.cpp b/src/core/gpumanager.cpp
+index e6f5ac646d..f59edc47d0 100644
+--- a/src/core/gpumanager.cpp
++++ b/src/core/gpumanager.cpp
+@@ -76,12 +76,14 @@ GpuManager::GpuManager()
+     , m_udmabufDevId(getDevId(m_udmabuf))
+     , m_udev(std::make_unique<Udev>())
+     , m_udevMonitor(m_udev->createMonitor())
+-    , m_udevNotifier(std::make_unique<QSocketNotifier>(m_udevMonitor->fd(), QSocketNotifier::Read))
++    , m_udevNotifier(m_udevMonitor && m_udevMonitor->fd() != -1 ? std::make_unique<QSocketNotifier>(m_udevMonitor->fd(), QSocketNotifier::Read) : nullptr)
+     , m_explicitRenderNodes(qEnvironmentVariableIsSet("KWIN_RENDER_NODES") ? splitPathList(qEnvironmentVariable("KWIN_RENDER_NODES")) : std::optional<QStringList>())
+ {
+-    m_udevMonitor->filterSubsystemDevType("drm");
+-    connect(m_udevNotifier.get(), &QSocketNotifier::activated, this, &GpuManager::handleUdevEvent);
+-    m_udevMonitor->enable();
++    if (m_udevMonitor && m_udevNotifier) {
++        m_udevMonitor->filterSubsystemDevType("drm");
++        connect(m_udevNotifier.get(), &QSocketNotifier::activated, this, &GpuManager::handleUdevEvent);
++        m_udevMonitor->enable();
++    }
+     scanForRenderDevices();
+ }
+ 
+diff --git a/src/plugins/gamecontroller/CMakeLists.txt b/src/plugins/gamecontroller/CMakeLists.txt
+index c9aba57849..b509e95e99 100644
+--- a/src/plugins/gamecontroller/CMakeLists.txt
++++ b/src/plugins/gamecontroller/CMakeLists.txt
+@@ -22,7 +22,7 @@ target_link_libraries(gamecontroller PRIVATE
+ 
+     KF6::I18n
+ 
+-    UDev::UDev
++#   UDev::UDev
+     PkgConfig::libevdev
+     XKB::XKB
+ )
+diff --git a/src/utils/udev.cpp b/src/utils/udev.cpp
+index f4cf49d942..e0a4f41a1e 100644
+--- a/src/utils/udev.cpp
++++ b/src/utils/udev.cpp
+@@ -14,6 +14,132 @@
+ // system
+ #include <cerrno>
+ #include <functional>
++
++#if defined(__ANDROID__)
++
++namespace KWin
++{
++
++Udev::Udev()
++    : m_udev(nullptr)
++{
++}
++
++Udev::~Udev() = default;
++
++std::vector<std::unique_ptr<UdevDevice>> Udev::listGPUs()
++{
++    return {};
++}
++
++std::vector<std::unique_ptr<UdevDevice>> Udev::listRenderNodes()
++{
++    return {};
++}
++
++std::unique_ptr<UdevDevice> Udev::deviceFromSyspath(const char *syspath)
++{
++    Q_UNUSED(syspath);
++    return nullptr;
++}
++
++std::unique_ptr<UdevMonitor> Udev::createMonitor()
++{
++    return nullptr;
++}
++
++UdevDevice::UdevDevice(udev_device *device)
++    : m_device(device)
++{
++}
++
++UdevDevice::~UdevDevice() = default;
++
++QByteArrayView UdevDevice::sysName() const
++{
++    return {};
++}
++
++QString UdevDevice::devNode() const
++{
++    return {};
++}
++
++dev_t UdevDevice::devNum() const
++{
++    return 0;
++}
++
++const char *UdevDevice::property(const char *key)
++{
++    Q_UNUSED(key);
++    return nullptr;
++}
++
++QMap<QByteArray, QByteArray> UdevDevice::properties() const
++{
++    return {};
++}
++
++bool UdevDevice::hasProperty(const char *key, const char *value)
++{
++    Q_UNUSED(key);
++    Q_UNUSED(value);
++    return false;
++}
++
++bool UdevDevice::isBootVga() const
++{
++    return false;
++}
++
++QString UdevDevice::seat() const
++{
++    return QStringLiteral("seat0");
++}
++
++QString UdevDevice::action() const
++{
++    return {};
++}
++
++bool UdevDevice::isHotpluggable() const
++{
++    return false;
++}
++
++UdevMonitor::UdevMonitor(Udev *udev)
++    : m_monitor(nullptr)
++{
++    Q_UNUSED(udev);
++}
++
++UdevMonitor::~UdevMonitor() = default;
++
++int UdevMonitor::fd() const
++{
++    return -1;
++}
++
++void UdevMonitor::filterSubsystemDevType(const char *subSystem, const char *devType)
++{
++    Q_UNUSED(subSystem);
++    Q_UNUSED(devType);
++}
++
++void UdevMonitor::enable()
++{
++}
++
++std::unique_ptr<UdevDevice> UdevMonitor::getDevice()
++{
++    return nullptr;
++}
++
++}
++
++#else
++
+ #include <libudev.h>
+ 
+ namespace KWin
+@@ -316,3 +442,5 @@ std::unique_ptr<UdevDevice> UdevMonitor::getDevice()
+ }
+ 
+ }
++
++#endif
+-- 
+2.47.3
+
