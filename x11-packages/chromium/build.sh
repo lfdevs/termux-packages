@@ -3,10 +3,10 @@ TERMUX_PKG_DESCRIPTION="Chromium web browser"
 TERMUX_PKG_LICENSE="BSD 3-Clause"
 TERMUX_PKG_MAINTAINER="@licy183"
 TERMUX_PKG_VERSION="157.0.8103.38"
-TERMUX_PKG_REVISION=1
+TERMUX_PKG_REVISION=90
 TERMUX_PKG_SRCURL="https://github.com/chromium-linux-tarballs/chromium-tarballs/releases/download/$TERMUX_PKG_VERSION/chromium-$TERMUX_PKG_VERSION-linux.tar.xz"
 TERMUX_PKG_SHA256=29904f34e47900e96b595e744a91ed23afc5f3060bf0e9f65817a043957ce7ad
-TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libxkbcommon, libminizip, libnss, libx11, mesa, openssl, pango, pipewire, pulseaudio, zlib"
+TERMUX_PKG_DEPENDS="atk, cups, dbus, fontconfig, gtk3, krb5, libc++, libevdev, libxkbcommon, libminizip, libnss, libva, libx11, mesa, openssl, pango, pipewire, pulseaudio, zlib"
 TERMUX_PKG_BUILD_DEPENDS="chromium-host-tools, libffi-static"
 # Chromium doesn't support i686 on Linux.
 TERMUX_PKG_EXCLUDED_ARCHES="i686"
@@ -282,7 +282,7 @@ use_libpci = false
 use_alsa = false
 use_pulseaudio = true
 rtc_use_pipewire = false
-use_vaapi = false
+use_vaapi = true
 # Host compiler (clang-13) doesn't support LTO well
 is_cfi = false
 use_cfi_icall = false
