@@ -1,0 +1,173 @@
+From 691bfceed913117260f86bd4f66889cb5eb36a90 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Sun, 26 Jul 2026 20:46:43 +0800
+Subject: [PATCH 09/12] backends/anland: harden and trace consumer reconnects
+
+Log each reconnect stage and the first frame rendered after importing
+fresh dma-bufs, including audio attachment, camera requests, selected
+buffer indices, and native fence creation.
+
+Report the kwin_wayland PID, exit code, and exit status from the wrapper
+so silent compositor restarts can be distinguished from client exits.
+
+Validate buffer counts and render targets before starting a frame, and
+stop reconnect processing if the camera request re-enters fallback.
+This prevents invalid render target access while providing enough
+context to isolate failures during session resume.
+---
+ src/backends/anland/anland_backend.cpp       | 19 +++++++++++--
+ src/backends/anland/anland_egl_backend.cpp   | 29 +++++++++++++++++++-
+ src/backends/anland/anland_egl_backend.h     |  1 +
+ src/helpers/wayland_wrapper/kwin_wrapper.cpp |  9 ++++++
+ 4 files changed, 55 insertions(+), 3 deletions(-)
+
+diff --git a/src/backends/anland/anland_backend.cpp b/src/backends/anland/anland_backend.cpp
+index 060c53ff17..6badd199fa 100644
+--- a/src/backends/anland/anland_backend.cpp
++++ b/src/backends/anland/anland_backend.cpp
+@@ -520,20 +520,35 @@ void AnlandBackend::onReconnectTimer()
+     // balanced regardless of whether the GL layer is attached yet.
+     AnlandEglLayer *layer = m_outputs[0]->eglLayer();
+     if (layer) {
+-        layer->importBuffers(get_buf_count(m_display));
++        const int bufferCount = get_buf_count(m_display);
++        qCDebug(KWIN_ANLAND) << "reconnect: importing" << bufferCount << "buffers";
++        if (!layer->importBuffers(bufferCount)) {
++            qCWarning(KWIN_ANLAND) << "reconnect: buffer import failed";
++        } else {
++            qCDebug(KWIN_ANLAND) << "reconnect: buffer import complete";
++        }
+     }
+     setupNotifiers();
++    qCDebug(KWIN_ANLAND) << "reconnect: notifiers installed";
+     // Attach the fresh audio socket (a new socketpair was installed by pickup_fds).
++    qCDebug(KWIN_ANLAND) << "reconnect: attaching audio fd" << get_audio_fd(m_display);
+     anland_audio_set_fd(get_audio_fd(m_display));
++    qCDebug(KWIN_ANLAND) << "reconnect: audio fd attached";
+     // Render loop is resuming and the data channel is live: immediately request the
+     // camera service. The consumer replies asynchronously with an INPUT_TYPE_RESOURCE
+     // event whose fds onInputReadable() hands to the camera engine. If the consumer
+     // has the camera disabled it simply never registers the service and never replies,
+     // so this is a harmless no-op in that case.
+-    push_resources_request(m_display, SERVICE_TYPE_CAMERA, nullptr);
++    const int cameraRequestResult = push_resources_request(m_display, SERVICE_TYPE_CAMERA, nullptr);
++    qCDebug(KWIN_ANLAND) << "reconnect: camera request result" << cameraRequestResult;
++    if (m_inFallback) {
++        return;
++    }
+     m_outputs[0]->resumeRendering();
++    qCDebug(KWIN_ANLAND) << "reconnect: render loop resumed";
+     if (layer) {
+         layer->scheduleRepaint(nullptr);
++        qCDebug(KWIN_ANLAND) << "reconnect: repaint scheduled";
+     }
+ }
+ 
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index f409a52793..c472ed7056 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -82,10 +82,17 @@ void AnlandEglLayer::releaseBuffers()
+     m_damageFlags = 0;
+     m_damageMask = 0;
+     m_bufCount = 0;
++    m_traceNextFrame = false;
+ }
+ 
+ bool AnlandEglLayer::importBuffers(int count)
+ {
++    if (count <= 0 || count > MAX_BUFS) {
++        qCWarning(KWIN_ANLAND) << "invalid buffer count" << count;
++        releaseBuffers();
++        return false;
++    }
++
+     m_backend->openglContext()->makeCurrent();
+ 
+     releaseBuffers();
+@@ -169,6 +176,7 @@ bool AnlandEglLayer::importBuffers(int count)
+     m_bufCount = count;
+     m_damageMask = (uint8_t)((1 << m_bufCount) - 1);
+     m_damageFlags = m_damageMask;
++    m_traceNextFrame = true;
+     return true;
+ }
+ 
+@@ -192,6 +200,17 @@ std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
+ 
+     m_currentIndex = get_selected_idx(m_display);
+ 
++    if (m_bufCount <= 0 || m_currentIndex < 0 || m_currentIndex >= m_bufCount
++        || !m_renderTargets[m_currentIndex]) {
++        qCWarning(KWIN_ANLAND) << "cannot begin frame with buffer count" << m_bufCount
++                               << "and selected index" << m_currentIndex;
++        return std::nullopt;
++    }
++    if (m_traceNextFrame) {
++        qCDebug(KWIN_ANLAND) << "beginning first frame after buffer import with index"
++                             << m_currentIndex << "of" << m_bufCount;
++    }
++
+     return OutputLayerBeginFrameInfo{
+         .renderTarget = *m_renderTargets[m_currentIndex],
+         .repaint = m_accumDamage[m_currentIndex],
+@@ -218,7 +237,15 @@ bool AnlandEglLayer::doEndFrame(const Region &renderedDeviceRegion, const Region
+     // it to ANativeWindow_queueBuffer, so SurfaceFlinger waits on it GPU-side before
+     // scanout -- letting us submit the buffer before its render completes.
+     EGLNativeFence fence{m_backend->openglContext()->displayObject()};
+-    set_render_fence(m_display, fence.takeFileDescriptor().take());
++    const bool fenceValid = fence.isValid();
++    const int fenceFd = fence.takeFileDescriptor().take();
++    set_render_fence(m_display, fenceFd);
++    if (m_traceNextFrame) {
++        qCDebug(KWIN_ANLAND) << "finished first frame after buffer import with index"
++                             << m_currentIndex << "native fence valid" << fenceValid
++                             << "fd" << fenceFd;
++        m_traceNextFrame = false;
++    }
+     return true;
+ }
+ 
+diff --git a/src/backends/anland/anland_egl_backend.h b/src/backends/anland/anland_egl_backend.h
+index bc80e1c2c5..9bb6678a06 100644
+--- a/src/backends/anland/anland_egl_backend.h
++++ b/src/backends/anland/anland_egl_backend.h
+@@ -63,6 +63,7 @@ private:
+     int m_currentIndex = 0;
+     uint8_t m_damageFlags = 0;
+     uint8_t m_damageMask = 0;
++    bool m_traceNextFrame = false;
+     std::array<std::shared_ptr<GLTexture>, MAX_BUFS> m_textures;
+     std::array<std::unique_ptr<GLFramebuffer>, MAX_BUFS> m_fbos;
+     std::array<std::optional<RenderTarget>, MAX_BUFS> m_renderTargets;
+diff --git a/src/helpers/wayland_wrapper/kwin_wrapper.cpp b/src/helpers/wayland_wrapper/kwin_wrapper.cpp
+index 56aee0d8eb..349e312eaa 100644
+--- a/src/helpers/wayland_wrapper/kwin_wrapper.cpp
++++ b/src/helpers/wayland_wrapper/kwin_wrapper.cpp
+@@ -59,6 +59,7 @@ private:
+     wl_socket *m_socket;
+ 
+     int m_crashCount = 0;
++    qint64 m_kwinPid = 0;
+     QProcess *m_kwinProcess = nullptr;
+ 
+     const std::chrono::microseconds m_watchdogInterval;
+@@ -133,7 +134,15 @@ void KWinWrapper::run()
+     m_kwinProcess->setProcessChannelMode(QProcess::ForwardedChannels);
+     m_kwinProcess->setArguments(args);
+ 
++    connect(m_kwinProcess, &QProcess::started, this, [this]() {
++        m_kwinPid = m_kwinProcess->processId();
++        qCInfo(KWIN_WRAPPER) << "Started kwin_wayland process" << m_kwinPid;
++    });
+     connect(m_kwinProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this](int exitCode, QProcess::ExitStatus exitStatus) {
++        qCWarning(KWIN_WRAPPER) << "kwin_wayland process" << m_kwinPid
++                                << "finished with exit code" << exitCode
++                                << "and exit status" << exitStatus;
++        m_kwinPid = 0;
+         if (exitCode == 0) {
+             qApp->quit();
+             return;
+-- 
+2.47.3
+

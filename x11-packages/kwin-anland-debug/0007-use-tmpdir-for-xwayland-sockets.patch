@@ -1,0 +1,83 @@
+From 1ee399b55f2e3d8568caa3bdae474ee925698fe7 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Tue, 7 Jul 2026 01:49:45 +0800
+Subject: [PATCH 07/12] xwayland: use TMPDIR for XWayland sockets
+
+---
+ src/xwayland/lib/xwaylandsocket.cpp | 25 ++++++++++++++++---------
+ 1 file changed, 16 insertions(+), 9 deletions(-)
+
+diff --git a/src/xwayland/lib/xwaylandsocket.cpp b/src/xwayland/lib/xwaylandsocket.cpp
+index aa2c000891..a9443f900d 100644
+--- a/src/xwayland/lib/xwaylandsocket.cpp
++++ b/src/xwayland/lib/xwaylandsocket.cpp
+@@ -8,6 +8,7 @@
+ #include "xwayland_logging.h"
+ 
+ #include <QCoreApplication>
++#include <QDir>
+ #include <QFile>
+ #include <QScopeGuard>
+ 
+@@ -68,14 +69,19 @@ int UnixSocketAddress::size() const
+     return m_buffer.size();
+ }
+ 
++static QString x11SocketDirectory()
++{
++    return QDir::cleanPath(qEnvironmentVariable("TMPDIR", QStringLiteral("/tmp")) + QStringLiteral("/.X11-unix"));
++}
++
+ static QString lockFileNameForDisplay(int display)
+ {
+-    return QStringLiteral("/tmp/.X%1-lock").arg(display);
++    return QDir::cleanPath(qEnvironmentVariable("TMPDIR", QStringLiteral("/tmp")) + QStringLiteral("/.X%1-lock")).arg(display);
+ }
+ 
+ static QString socketFileNameForDisplay(int display)
+ {
+-    return QStringLiteral("/tmp/.X11-unix/X%1").arg(display);
++    return x11SocketDirectory() + QStringLiteral("/X%1").arg(display);
+ }
+ 
+ static bool tryLockFile(const QString &lockFileName)
+@@ -135,28 +141,29 @@ static int listen_helper(const QString &filePath, UnixSocketAddress::Type type,
+ static bool checkSocketsDirectory()
+ {
+     struct stat info;
+-    const char *path = "/tmp/.X11-unix";
++    const QString socketDirectory = x11SocketDirectory();
++    const QByteArray encodedSocketDirectory = QFile::encodeName(socketDirectory);
+ 
+-    if (lstat(path, &info) != 0) {
++    if (lstat(encodedSocketDirectory.constData(), &info) != 0) {
+         if (errno == ENOENT) {
+-            qCWarning(KWIN_XWL) << path << "does not exist. Please check your installation";
++            qCWarning(KWIN_XWL) << socketDirectory << "does not exist. Please check your installation";
+             return false;
+         }
+ 
+-        qCWarning(KWIN_XWL, "Failed to stat %s: %s", path, strerror(errno));
++        qCWarning(KWIN_XWL, "Failed to stat %s: %s", encodedSocketDirectory.constData(), strerror(errno));
+         return false;
+     }
+ 
+     if (!S_ISDIR(info.st_mode)) {
+-        qCWarning(KWIN_XWL) << path << "is not a directory. Broken system?";
++        qCWarning(KWIN_XWL) << socketDirectory << "is not a directory. Broken system?";
+         return false;
+     }
+     if (info.st_uid != 0 && info.st_uid != getuid()) {
+-        qCWarning(KWIN_XWL) << path << "is not owned by root or us";
++        qCWarning(KWIN_XWL) << socketDirectory << "is not owned by root or us";
+         return false;
+     }
+     if (!(info.st_mode & S_ISVTX)) {
+-        qCWarning(KWIN_XWL) << path << "has no sticky bit on. Your system might be compromised!";
++        qCWarning(KWIN_XWL) << socketDirectory << "has no sticky bit on. Your system might be compromised!";
+         return false;
+     }
+ 
+-- 
+2.47.3
+
