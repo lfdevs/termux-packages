@@ -1,0 +1,65 @@
+From eaac4a2f13e67ba640808f8b9543c70a52955232 Mon Sep 17 00:00:00 2001
+From: lfdevs <lfdevs@lfdevs.com>
+Date: Fri, 9 Oct 2026 16:37:34 +0800
+Subject: [PATCH] backends/anland: adapt to nodiscard EGL context activation
+
+Check EGL context activation before importing buffers or beginning a frame, and explicitly discard the result in cleanup paths.
+---
+ src/backends/anland/anland_egl_backend.cpp | 13 ++++++++-----
+ 1 file changed, 8 insertions(+), 5 deletions(-)
+
+diff --git a/src/backends/anland/anland_egl_backend.cpp b/src/backends/anland/anland_egl_backend.cpp
+index c472ed7056..fc52a77943 100644
+--- a/src/backends/anland/anland_egl_backend.cpp
++++ b/src/backends/anland/anland_egl_backend.cpp
+@@ -71,7 +71,7 @@ void AnlandEglLayer::releaseBuffers()
+ {
+     // Destroying the GL textures/framebuffers needs the context current. Callers
+     // (backend state machine on fallback, ~AnlandEglLayer) may run outside a frame.
+-    m_backend->openglContext()->makeCurrent();
++    (void)m_backend->openglContext()->makeCurrent();
+ 
+     for (int i = 0; i < MAX_BUFS; i++) {
+         m_fbos[i].reset();
+@@ -93,7 +93,9 @@ bool AnlandEglLayer::importBuffers(int count)
+         return false;
+     }
+ 
+-    m_backend->openglContext()->makeCurrent();
++    if (!m_backend->openglContext()->makeCurrent()) {
++        return false;
++    }
+ 
+     releaseBuffers();
+ 
+@@ -196,7 +198,9 @@ void AnlandEglLayer::onOutputTransformChanged()
+ 
+ std::optional<OutputLayerBeginFrameInfo> AnlandEglLayer::doBeginFrame()
+ {
+-    m_backend->openglContext()->makeCurrent();
++    if (!m_backend->openglContext()->makeCurrent()) {
++        return std::nullopt;
++    }
+ 
+     m_currentIndex = get_selected_idx(m_display);
+ 
+@@ -331,7 +335,6 @@ bool AnlandEglBackend::initRenderingContext()
+ 
+ void AnlandEglBackend::addOutput(BackendOutput *output)
+ {
+-    openglContext()->makeCurrent();
+     auto *anlandOutput = static_cast<AnlandOutput *>(output);
+     auto layer = std::make_unique<AnlandEglLayer>(anlandOutput, this);
+     // Let AnlandBackend reach this layer through its output (output->eglLayer()).
+@@ -341,7 +344,7 @@ void AnlandEglBackend::addOutput(BackendOutput *output)
+ 
+ void AnlandEglBackend::removeOutput(BackendOutput *output)
+ {
+-    openglContext()->makeCurrent();
++    (void)openglContext()->makeCurrent();
+     static_cast<AnlandOutput *>(output)->setEglLayer(nullptr);
+     m_outputs.erase(output);
+ }
+-- 
+2.47.3
+
